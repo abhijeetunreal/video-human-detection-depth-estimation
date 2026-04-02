@@ -32,6 +32,7 @@
           <video id="video" autoplay muted playsinline></video>
           <canvas id="canvas" width="360" height="240"></canvas>
           <div id="overlay"></div>
+          <div id="calibration-layer" aria-hidden="true"></div>
         </div>
       </div>
       <div class="camera-panel">
@@ -97,6 +98,40 @@
           value="504"
           disabled
         />
+      </div>
+    </div>
+    <div id="calibration-controls" class="calibration-controls">
+      <div class="calibration-controls-row">
+        <label class="calibration-toggle">
+          <input id="calibrate-mode" type="checkbox" />
+          Calibrate distance
+        </label>
+        <label class="calibration-invert">
+          <input id="calibration-invert" type="checkbox" />
+          Invert depth (if distances look reversed)
+        </label>
+      </div>
+      <p class="calibration-hint">
+        Turn on calibration, drag a rectangle over a surface at a known distance,
+        enter that distance in meters, then Apply. Each frame, depth is averaged in
+        that same region and used as the live reference (so exposure or lighting
+        shifts are tracked). Person distance uses the person’s center depth
+        relative to that reference.
+      </p>
+      <div class="calibration-controls-row calibration-actions">
+        <label>
+          Real distance (m)
+          <input
+            id="calibration-distance"
+            type="number"
+            min="0.01"
+            step="0.01"
+            value="2"
+            disabled
+          />
+        </label>
+        <button type="button" id="calibration-apply" disabled>Apply</button>
+        <button type="button" id="calibration-clear" disabled>Clear</button>
       </div>
     </div>
     <label id="status"></label>

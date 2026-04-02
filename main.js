@@ -30,6 +30,32 @@ const scaleSlider = document.getElementById("scale");
 const scaleLabel = document.getElementById("scale-value");
 const depthSizeSlider = document.getElementById("depth-size");
 const depthSizeLabel = document.getElementById("depth-size-value");
+const calibrationLayer = document.getElementById("calibration-layer");
+const calibrateModeCheckbox = document.getElementById("calibrate-mode");
+const calibrationDistanceInput = document.getElementById("calibration-distance");
+const calibrationApplyBtn = document.getElementById("calibration-apply");
+const calibrationClearBtn = document.getElementById("calibration-clear");
+const calibrationInvertCheckbox = document.getElementById("calibration-invert");
+
+/** Latest depth + detection sizes for Apply (same tensors as live view). */
+let lastDepthState = null;
+/** @type {[number, number] | null} */
+let lastDetSizes = null;
+
+/**
+ * @typedef {{ dRef: number, useInverse: boolean, roiDet: { xmin: number, ymin: number, xmax: number, ymax: number } }} Calibration
+ * @type {Calibration | null}
+ */
+let calibration = null;
+
+/** Mean raw depth in the calibration ROI for the current frame (tracks exposure / lighting drift). */
+let calibrationRefRawThisFrame = null;
+
+/** Draft ROI in detection space (while dragging or before Apply). */
+let draftRoiDet = null;
+let isDrawingRoi = false;
+/** @type {{ x: number, y: number } | null} */
+let roiDragStartDet = null;
 
 function setStreamSize(width, height) {
   video.width = canvas.width = Math.round(width);
@@ -139,6 +165,257 @@ function sampleDepthAt(data, ow, oh, cx, cy, wDet, hDet, min, max) {
   return { raw, rel };
 }
 
+/**
+ * Mean raw depth over depth pixels whose mapped det-space position lies inside the rectangle.
+ * Uses the same det→depth index mapping as sampleDepthAt (inverse mapping from grid).
+ */
+function meanDepthInRect(data, ow, oh, xmin, ymin, xmax, ymax, wDet, hDet) {
+  const x0 = Math.min(xmin, xmax);
+  const x1 = Math.max(xmin, xmax);
+  const y0 = Math.min(ymin, ymax);
+  const y1 = Math.max(ymin, ymax);
+  if (x1 <= x0 || y1 <= y0) return { mean: NaN, count: 0 };
+
+  const stride = ow * oh > 320_000 ? 2 : 1;
+  let sum = 0;
+  let count = 0;
+  const xDen = Math.max(1, ow - 1);
+  const yDen = Math.max(1, oh - 1);
+
+  for (let iy = 0; iy < oh; iy += stride) {
+    for (let ix = 0; ix < ow; ix += stride) {
+      const cx = (ix / xDen) * wDet;
+      const cy = (iy / yDen) * hDet;
+      if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) {
+        sum += data[iy * ow + ix];
+        count += 1;
+      }
+    }
+  }
+
+  if (count === 0) return { mean: NaN, count: 0 };
+  return { mean: sum / count, count };
+}
+
+function clientToDetSpace(clientX, clientY, wDet, hDet) {
+  const rect = container.getBoundingClientRect();
+  const x = ((clientX - rect.left) / rect.width) * wDet;
+  const y = ((clientY - rect.top) / rect.height) * hDet;
+  return { x, y };
+}
+
+/**
+ * @param {number} raw — depth sample at person center (same frame as rawRefLive).
+ * @param {Calibration | null} cal
+ * @param {number | null} rawRefLive — mean depth in the marked calibration ROI for this frame only.
+ */
+function metricDistanceFromRaw(raw, cal, rawRefLive) {
+  if (!cal) return null;
+  const { dRef, useInverse } = cal;
+  if (
+    rawRefLive === null ||
+    !Number.isFinite(rawRefLive) ||
+    Math.abs(rawRefLive) < 1e-12
+  ) {
+    return null;
+  }
+  if (useInverse) {
+    if (Math.abs(raw) < 1e-12) return Infinity;
+    return (dRef * rawRefLive) / raw;
+  }
+  return (dRef / rawRefLive) * raw;
+}
+
+function updateCalibrationUiState() {
+  const mode = calibrateModeCheckbox.checked;
+  calibrationLayer.classList.toggle("calibration-layer-active", mode);
+  calibrationDistanceInput.disabled = !mode;
+  const canApply =
+    mode &&
+    draftRoiDet !== null &&
+    lastDepthState !== null &&
+    lastDetSizes !== null;
+  calibrationApplyBtn.disabled = !canApply;
+  calibrationClearBtn.disabled = !calibration && !draftRoiDet;
+}
+
+calibrationInvertCheckbox.addEventListener("change", () => {
+  if (calibration) {
+    calibration.useInverse = calibrationInvertCheckbox.checked;
+  }
+});
+
+function renderSavedRoiOutline() {
+  if (!calibration?.roiDet || !lastDetSizes) return;
+  const [wDet, hDet] = lastDetSizes;
+  const { xmin, ymin, xmax, ymax } = calibration.roiDet;
+  const box = document.createElement("div");
+  box.className = "calibration-roi-saved";
+  Object.assign(box.style, {
+    left: (100 * xmin) / wDet + "%",
+    top: (100 * ymin) / hDet + "%",
+    width: (100 * (xmax - xmin)) / wDet + "%",
+    height: (100 * (ymax - ymin)) / hDet + "%",
+  });
+  calibrationLayer.appendChild(box);
+}
+
+function renderDraftRoiOutline() {
+  if (!draftRoiDet || !lastDetSizes) return;
+  const [wDet, hDet] = lastDetSizes;
+  const { xmin, ymin, xmax, ymax } = draftRoiDet;
+  const box = document.createElement("div");
+  box.className = "calibration-roi-draft";
+  Object.assign(box.style, {
+    left: (100 * xmin) / wDet + "%",
+    top: (100 * ymin) / hDet + "%",
+    width: (100 * (xmax - xmin)) / wDet + "%",
+    height: (100 * (ymax - ymin)) / hDet + "%",
+  });
+  calibrationLayer.appendChild(box);
+}
+
+function refreshCalibrationLayer() {
+  calibrationLayer.replaceChildren();
+  if (calibration) renderSavedRoiOutline();
+  if (calibrateModeCheckbox.checked && draftRoiDet) renderDraftRoiOutline();
+}
+
+calibrateModeCheckbox.addEventListener("change", () => {
+  if (!calibrateModeCheckbox.checked) {
+    isDrawingRoi = false;
+    roiDragStartDet = null;
+    draftRoiDet = null;
+    refreshCalibrationLayer();
+  }
+  updateCalibrationUiState();
+});
+
+function pointerDownRoi(ev) {
+  if (!calibrateModeCheckbox.checked || !lastDetSizes) return;
+  ev.preventDefault();
+  const [wDet, hDet] = lastDetSizes;
+  const p = clientToDetSpace(ev.clientX, ev.clientY, wDet, hDet);
+  isDrawingRoi = true;
+  roiDragStartDet = p;
+  draftRoiDet = { xmin: p.x, ymin: p.y, xmax: p.x, ymax: p.y };
+  refreshCalibrationLayer();
+  updateCalibrationUiState();
+}
+
+function pointerMoveRoi(ev) {
+  if (!isDrawingRoi || !roiDragStartDet || !lastDetSizes) return;
+  ev.preventDefault();
+  const [wDet, hDet] = lastDetSizes;
+  const p = clientToDetSpace(ev.clientX, ev.clientY, wDet, hDet);
+  draftRoiDet = {
+    xmin: Math.min(roiDragStartDet.x, p.x),
+    ymin: Math.min(roiDragStartDet.y, p.y),
+    xmax: Math.max(roiDragStartDet.x, p.x),
+    ymax: Math.max(roiDragStartDet.y, p.y),
+  };
+  refreshCalibrationLayer();
+}
+
+function pointerUpRoi(ev) {
+  if (!isDrawingRoi) return;
+  ev.preventDefault();
+  isDrawingRoi = false;
+  roiDragStartDet = null;
+  updateCalibrationUiState();
+}
+
+calibrationLayer.addEventListener("mousedown", pointerDownRoi);
+window.addEventListener("mousemove", pointerMoveRoi);
+window.addEventListener("mouseup", pointerUpRoi);
+
+calibrationLayer.addEventListener(
+  "touchstart",
+  (ev) => {
+    if (!calibrateModeCheckbox.checked || !lastDetSizes) return;
+    ev.preventDefault();
+    const t = ev.changedTouches[0];
+    pointerDownRoi({ clientX: t.clientX, clientY: t.clientY, preventDefault: () => {} });
+  },
+  { passive: false },
+);
+
+window.addEventListener(
+  "touchmove",
+  (ev) => {
+    if (!isDrawingRoi || !lastDetSizes) return;
+    ev.preventDefault();
+    const t = ev.changedTouches[0];
+    pointerMoveRoi({ clientX: t.clientX, clientY: t.clientY, preventDefault: () => {} });
+  },
+  { passive: false },
+);
+
+window.addEventListener("touchend", (ev) => {
+  if (!isDrawingRoi) return;
+  pointerUpRoi(ev);
+});
+
+calibrationApplyBtn.addEventListener("click", () => {
+  if (!lastDepthState || !lastDetSizes || !draftRoiDet) {
+    status.textContent = "No depth frame or region — wait for video, then draw a region.";
+    return;
+  }
+  const dRef = Number(calibrationDistanceInput.value);
+  if (!Number.isFinite(dRef) || dRef <= 0) {
+    status.textContent = "Enter a positive real distance in meters.";
+    return;
+  }
+  const [wDet, hDet] = lastDetSizes;
+  const { data, ow, oh } = lastDepthState;
+  const { xmin, ymin, xmax, ymax } = draftRoiDet;
+  const { mean, count } = meanDepthInRect(
+    data,
+    ow,
+    oh,
+    xmin,
+    ymin,
+    xmax,
+    ymax,
+    wDet,
+    hDet,
+  );
+  if (count === 0 || !Number.isFinite(mean)) {
+    status.textContent = "Could not sample depth in that region — try a larger area.";
+    return;
+  }
+  if (Math.abs(mean) < 1e-12) {
+    status.textContent = "Depth value too small to calibrate — try another region.";
+    return;
+  }
+
+  calibration = {
+    dRef,
+    useInverse: calibrationInvertCheckbox.checked,
+    roiDet: {
+      xmin,
+      ymin,
+      xmax,
+      ymax,
+    },
+  };
+  draftRoiDet = null;
+  refreshCalibrationLayer();
+  calibrationInvertCheckbox.checked = calibration.useInverse;
+  updateCalibrationUiState();
+  status.textContent = `Calibrated: ${dRef} m — reference region re-sampled each frame`;
+});
+
+calibrationClearBtn.addEventListener("click", () => {
+  calibration = null;
+  draftRoiDet = null;
+  refreshCalibrationLayer();
+  updateCalibrationUiState();
+  status.textContent = "Calibration cleared";
+});
+
+updateCalibrationUiState();
+
 function renderBox(
   [xmin, ymin, xmax, ymax, score, id],
   [wDet, hDet],
@@ -168,7 +445,18 @@ function renderBox(
 
   const depthLabel = document.createElement("span");
   depthLabel.className = "bounding-box-depth-label";
-  depthLabel.textContent = `${(rel * 100).toFixed(0)}% · ${raw.toFixed(2)}`;
+  const meters = metricDistanceFromRaw(
+    raw,
+    calibration,
+    calibrationRefRawThisFrame,
+  );
+  if (meters !== null && Number.isFinite(meters)) {
+    depthLabel.textContent = `${meters.toFixed(2)} m`;
+  } else if (meters !== null && !Number.isFinite(meters)) {
+    depthLabel.textContent = "—";
+  } else {
+    depthLabel.textContent = `${(rel * 100).toFixed(0)}% · ${raw.toFixed(2)}`;
+  }
 
   boxElement.appendChild(dot);
   boxElement.appendChild(depthLabel);
@@ -232,12 +520,41 @@ function updateCanvas() {
       const detInputs = await detProcessor(image);
       const { outputs } = await detModel(detInputs);
 
+      const sizes = detInputs.reshaped_input_sizes[0].reverse();
+      lastDepthState = depthState;
+      lastDetSizes = sizes;
+
+      calibrationRefRawThisFrame = null;
+      if (calibration) {
+        const [wDet, hDet] = sizes;
+        const { data, ow, oh } = depthState;
+        const { xmin, ymin, xmax, ymax } = calibration.roiDet;
+        const { mean, count } = meanDepthInRect(
+          data,
+          ow,
+          oh,
+          xmin,
+          ymin,
+          xmax,
+          ymax,
+          wDet,
+          hDet,
+        );
+        if (
+          count > 0 &&
+          Number.isFinite(mean) &&
+          Math.abs(mean) >= 1e-12
+        ) {
+          calibrationRefRawThisFrame = mean;
+        }
+      }
+
       overlay.innerHTML = "";
 
-      const sizes = detInputs.reshaped_input_sizes[0].reverse();
-      outputs
-        .tolist()
-        .forEach((x) => renderBox(x, sizes, depthState));
+      outputs.tolist().forEach((x) => renderBox(x, sizes, depthState));
+
+      refreshCalibrationLayer();
+      updateCalibrationUiState();
 
       if (previousTime !== undefined) {
         const fps = 1000 / (performance.now() - previousTime);
