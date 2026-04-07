@@ -2,6 +2,8 @@
 
 Self-contained firmware, Python serial bridge, and local web dashboard (vision + machine control). The parent repo’s detection app is unchanged.
 
+**Repo overview (vision demo + this stack):** [../README.md](../README.md).
+
 ## Public demo vs machine control
 
 - **Public (HTTPS) demo** of the original vision app: [video-human-detection-depth-estimation](https://abhijeet.codefrydev.in/video-human-detection-depth-estimation/) — useful for sharing; **do not rely on it** to reach USB serial on your PC (browser security).
