@@ -1,0 +1,1011 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ball machine — control</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+
+  <body class="machine-idle theme-pitch">
+    <div id="app-root" class="app-root">
+      <header class="dash-header" role="banner">
+        <div class="dash-header-left">
+          <div class="brand-mark" aria-hidden="true"></div>
+          <div>
+            <h1 class="dash-title">Ball machine</h1>
+            <p class="dash-sub">
+              <span class="sr-only">Vision stack: </span>
+              <a
+                href="https://github.com/huggingface/transformers.js"
+                target="_blank"
+                rel="noreferrer"
+                >Transformers.js</a
+              >
+              <span aria-hidden="true"> · </span>
+              <span class="dash-sub-quiet">runs locally in the browser</span>
+            </p>
+          </div>
+        </div>
+        <div class="dash-header-center" aria-live="polite">
+          <div class="dash-status-row">
+            <div class="dash-status-group" title="WebSocket bridge to Python">
+              <span class="dash-status-label">Bridge</span>
+              <div
+                id="bridge-pill"
+                class="status-orb status-orb-offline"
+                title="Bridge"
+              >
+                <span class="status-orb-glow" aria-hidden="true"></span>
+              </div>
+              <span id="bridge-status-text" class="dash-status-text"
+                >Offline</span
+              >
+              <span id="bridge-pill-text" class="sr-only">Bridge offline</span>
+            </div>
+            <div class="dash-status-group" title="Arduino serial via bridge">
+              <span class="dash-status-label">Serial</span>
+              <div
+                id="serial-pill"
+                class="status-orb status-orb-muted"
+                title="Serial"
+              >
+                <span class="status-orb-glow" aria-hidden="true"></span>
+              </div>
+              <span id="serial-status-text" class="dash-status-text">—</span>
+              <span id="serial-pill-text" class="sr-only">Serial</span>
+            </div>
+            <div class="dash-status-group dash-status-group--latency">
+              <span class="dash-status-label">Latency</span>
+              <span id="bridge-latency" class="bridge-latency muted">—</span>
+            </div>
+          </div>
+        </div>
+        <div class="dash-header-trailing">
+          <div
+            id="header-chip-host"
+            class="header-chip-host"
+            aria-live="polite"
+            aria-label="Alerts and status messages"
+          ></div>
+          <div
+            class="dash-header-right"
+            role="group"
+            aria-label="Machine and display controls"
+          >
+            <div class="header-action">
+              <span class="header-action-label" id="label-header-arm">Arm</span>
+              <label
+                class="arm-latch"
+                title="Arm launch sequence"
+                aria-labelledby="label-header-arm"
+              >
+                <span class="sr-only">Arm machine</span>
+                <input id="arm-checkbox" type="checkbox" disabled />
+                <span class="arm-latch-face" aria-hidden="true"></span>
+              </label>
+            </div>
+            <div class="header-action">
+              <span class="header-action-label" id="label-header-stop">Stop</span>
+              <button
+                type="button"
+                id="btn-stop"
+                class="btn-estop"
+                disabled
+                title="Emergency stop"
+                aria-labelledby="label-header-stop"
+              >
+                <span class="btn-estop-inner" aria-hidden="true"></span>
+                <span class="sr-only">Emergency stop</span>
+              </button>
+            </div>
+            <div class="header-action">
+              <span class="header-action-label" id="label-header-reconnect"
+                >Reconnect</span
+              >
+              <button
+                type="button"
+                id="btn-reconnect"
+                class="btn-icon header-tool-btn"
+                title="Reconnect to bridge"
+                aria-labelledby="label-header-reconnect"
+              >
+                <span class="sr-only">Reconnect bridge</span>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+                </svg>
+              </button>
+            </div>
+            <div class="header-action">
+              <span class="header-action-label" id="label-header-theme">Theme</span>
+              <button
+                type="button"
+                id="btn-theme"
+                class="btn-icon header-tool-btn"
+                title="Switch color theme"
+                aria-labelledby="label-header-theme"
+              >
+                <span class="sr-only">Switch color theme</span>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <circle cx="12" cy="12" r="4" />
+                  <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div id="alert-banner" class="alert-banner hidden" role="alert"></div>
+
+      <main class="dash-main">
+        <div class="workspace" role="presentation">
+          <aside
+            id="panel-machine"
+            class="panel panel-machine"
+            aria-labelledby="tab-label-machine"
+          >
+          <nav
+            class="panel-local-tabs"
+            role="tablist"
+            aria-label="Machine column"
+          >
+            <span
+              id="tab-label-machine"
+              class="panel-local-tab panel-local-tab--active"
+              role="tab"
+              aria-selected="true"
+              >Machine</span
+            >
+          </nav>
+          <div
+            id="kinetic-panel"
+            class="kinetic-panel machine-idle"
+          >
+            <div id="machine-status-live" class="sr-only" aria-live="assertive"></div>
+
+            <div class="kinetic-schematic">
+              <div class="chamber-wrap">
+                <div id="chamber-ring" class="chamber-ring">
+                  <div class="chamber-inner">
+                    <div class="chamber-hub" aria-hidden="true"></div>
+                    <div
+                      id="rotor-arm-ghost"
+                      class="rotor-arm rotor-arm-ghost"
+                      aria-hidden="true"
+                    ></div>
+                    <div id="rotor-arm" class="rotor-arm" aria-hidden="true"></div>
+                  </div>
+                  <div class="chamber-glow" aria-hidden="true"></div>
+                </div>
+                <div class="dwell-ring-wrap" aria-hidden="true">
+                  <svg class="dwell-ring-svg" viewBox="0 0 100 100">
+                    <circle
+                      class="dwell-ring-bg"
+                      cx="50"
+                      cy="50"
+                      r="44"
+                      fill="none"
+                    />
+                    <circle
+                      id="dwell-ring-arc"
+                      class="dwell-ring-arc"
+                      cx="50"
+                      cy="50"
+                      r="44"
+                      fill="none"
+                    />
+                  </svg>
+                </div>
+              </div>
+
+              <div id="launch-tunnel" class="launch-tunnel" aria-hidden="true">
+                <div class="launch-tunnel-label">Launch path</div>
+                <div class="launch-tunnel-shaft">
+                  <div id="tunnel-trail" class="tunnel-trail" aria-hidden="true"></div>
+                  <div id="tunnel-ball" class="tunnel-ball"></div>
+                </div>
+              </div>
+
+              <div class="feeder-block">
+                <span class="unit-label">Ball feed</span>
+                <div id="feeder-gate" class="feeder-gate" aria-hidden="true">
+                  <div class="feeder-flap"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="kinetic-hud">
+              <div class="hud-stat">
+                <span class="hud-label">RPM (measured)</span>
+                <span class="hud-val" id="rpm-meas">—</span>
+              </div>
+              <div class="hud-stat hud-stat-target">
+                <span class="hud-label">RPM (target)</span>
+                <span class="hud-val" id="rpm-target">—</span>
+              </div>
+              <div class="hud-stat">
+                <span class="hud-label">Distance command</span>
+                <span class="hud-val hud-val-with-unit"
+                  ><span id="cmd-dist">—</span><span class="hud-suffix">m</span></span
+                >
+              </div>
+              <div class="hud-stat hud-stat-state">
+                <span class="hud-label">MCU state</span>
+                <span id="mcu-state" class="state-pill state-idle">IDLE</span>
+              </div>
+            </div>
+
+            <div class="gauge-block">
+              <span class="hud-label gauge-label">Speed match to target</span>
+              <div
+                id="gauge-bar"
+                class="hud-gauge"
+                role="progressbar"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow="0"
+                aria-label="Measured speed as percent of target RPM"
+              >
+                <div id="gauge-fill" class="gauge-fill"></div>
+              </div>
+            </div>
+            <p id="rpm-band-hint" class="hud-hint muted"></p>
+            <p id="mcu-err" class="mcu-err hidden" role="status"></p>
+
+            <div id="throw-live-strip" class="throw-live-strip" aria-live="polite">
+              <div id="throw-live-heading" class="throw-live-heading">Live</div>
+              <dl class="throw-live-dl">
+                <div class="throw-live-row throw-live-row-cmd">
+                  <dt>Command distance</dt>
+                  <dd id="throw-live-cmd-m">—</dd>
+                </div>
+                <div class="throw-live-row throw-live-row-mcu">
+                  <dt>MCU reports distance</dt>
+                  <dd id="throw-live-mcu-m">—</dd>
+                </div>
+                <div class="throw-live-row throw-live-row-band">
+                  <dt>Active band</dt>
+                  <dd id="throw-live-band">—</dd>
+                </div>
+                <div class="throw-live-row">
+                  <dt>Target RPM (MCU)</dt>
+                  <dd id="throw-live-rpm">—</dd>
+                </div>
+              </dl>
+            </div>
+
+            <div id="dwell-fill" class="sr-only" aria-hidden="true"></div>
+          </div>
+          </aside>
+
+          <section
+            id="panel-tracking"
+            class="panel panel-vision"
+            aria-label="Camera and player tracking"
+          >
+            <div
+              class="panel-local-tabs panel-local-tabs--tracking-row"
+              aria-label="Tracking column header"
+            >
+              <nav
+                class="panel-local-tabs__tabs"
+                role="tablist"
+                aria-label="Tracking column"
+              >
+                <span
+                  class="panel-local-tab panel-local-tab--active"
+                  role="tab"
+                  aria-selected="true"
+                  >Tracking</span
+                >
+              </nav>
+              <p
+                id="status"
+                class="fps-status fps-status--beside-tab"
+                aria-live="polite"
+              ></p>
+            </div>
+            <div class="panel-vision-body">
+            <div id="vision-stage" class="vision-stage">
+              <div id="camera-panels" class="camera-panels">
+                <div class="camera-panel">
+                  <div class="camera-panel-title">Camera</div>
+                  <div id="container">
+                    <video id="video" autoplay muted playsinline></video>
+                    <canvas id="canvas" width="360" height="240"></canvas>
+                    <div id="overlay"></div>
+                    <div id="calibration-layer" aria-hidden="true"></div>
+                  </div>
+                </div>
+                <div class="camera-panel">
+                  <div class="camera-panel-title">Depth</div>
+                  <div id="depth-container">
+                    <canvas id="depth-canvas"></canvas>
+                  </div>
+                </div>
+              </div>
+              <div class="vision-footer">
+                <div class="players-strip" aria-live="polite">
+                  <span class="players-icon" aria-hidden="true"></span>
+                  <span class="players-strip-label">Players in frame</span>
+                  <span id="players-count" class="players-count">0</span>
+                  <span
+                    id="roster-count"
+                    class="roster-count-pill"
+                    aria-hidden="true"
+                    >(0)</span
+                  >
+                </div>
+                <div
+                  id="player-roster"
+                  class="player-deck"
+                  aria-label="Select target player"
+                ></div>
+              </div>
+            </div>
+
+            <div
+              class="vscode-terminal-wrap"
+              aria-label="Terminal and logs"
+            >
+              <div class="vscode-terminal-tabs" role="tablist" aria-label="Panel tabs">
+                <span class="vscode-tab vscode-tab--fake" aria-hidden="true">Problems</span>
+                <span class="vscode-tab vscode-tab--fake" aria-hidden="true">Output</span>
+                <span class="vscode-tab vscode-tab--fake" aria-hidden="true">Debug Console</span>
+                <button
+                  type="button"
+                  class="vscode-tab vscode-tab--active"
+                  role="tab"
+                  aria-selected="true"
+                  id="tab-terminal-main"
+                >
+                  Terminal
+                </button>
+                <span class="vscode-tab vscode-tab--fake" aria-hidden="true">Ports</span>
+              </div>
+              <div class="vscode-terminal-chrome">
+                <div class="vscode-terminal-toolbar" aria-label="Terminal actions">
+                  <button
+                    type="button"
+                    class="vscode-tb-btn"
+                    title="New terminal"
+                    aria-label="New terminal"
+                    disabled
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                  </button>
+                  <button
+                    type="button"
+                    class="vscode-tb-btn"
+                    title="Split terminal"
+                    aria-label="Split terminal"
+                    disabled
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18"/></svg>
+                  </button>
+                  <button
+                    type="button"
+                    class="vscode-tb-btn"
+                    id="btn-terminal-clear"
+                    title="Clear visible log"
+                    aria-label="Clear visible log"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>
+                  </button>
+                  <button
+                    type="button"
+                    class="vscode-tb-btn"
+                    id="btn-terminal-copy"
+                    title="Copy visible log"
+                    aria-label="Copy visible log"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="vscode-terminal-body">
+                <div
+                  id="terminal-view-serial"
+                  class="vscode-terminal-view"
+                  role="tabpanel"
+                  aria-labelledby="terminal-session-serial"
+                >
+                  <div id="serial-terminal" class="vscode-terminal-stream" role="log"></div>
+                  <span class="vscode-terminal-caret" aria-hidden="true"></span>
+                </div>
+                <div
+                  id="terminal-view-activity"
+                  class="vscode-terminal-view vscode-terminal-view--active"
+                  role="tabpanel"
+                  aria-labelledby="terminal-session-activity"
+                >
+                  <div id="activity-terminal" class="vscode-terminal-stream" role="log"></div>
+                  <span class="vscode-terminal-caret" aria-hidden="true"></span>
+                </div>
+                <nav class="vscode-terminal-sessions" aria-label="Terminal sessions">
+                  <button
+                    type="button"
+                    class="vscode-session vscode-session--active"
+                    id="terminal-session-activity"
+                    data-terminal-target="activity"
+                  >
+                    <span class="vscode-session-icon vscode-session-icon--bolt" aria-hidden="true"></span>
+                    Bridge &amp; UI
+                  </button>
+                  <button
+                    type="button"
+                    class="vscode-session"
+                    id="terminal-session-serial"
+                    data-terminal-target="serial"
+                  >
+                    <span class="vscode-session-icon" aria-hidden="true"></span>
+                    MCU serial
+                  </button>
+                </nav>
+              </div>
+              <p class="vscode-terminal-hint muted">
+                Bridge &amp; UI = WebSocket events and server-side bridge actions · MCU serial = Arduino lines (dev-server style log).
+              </p>
+            </div>
+            </div>
+          </section>
+
+          <aside
+            class="panel panel-controls"
+            aria-label="Bridge, calibration, and motor"
+          >
+            <nav
+              class="panel-local-tabs panel-local-tabs--controls"
+              role="tablist"
+              aria-label="Connection and motor setup"
+            >
+              <button
+                type="button"
+                class="panel-local-tab panel-local-tab--active"
+                role="tab"
+                aria-selected="true"
+                data-right-tab="bridge"
+              >
+                Bridge
+              </button>
+              <button
+                type="button"
+                class="panel-local-tab"
+                role="tab"
+                aria-selected="false"
+                data-right-tab="calibration"
+              >
+                Calibration
+              </button>
+              <button
+                type="button"
+                class="panel-local-tab"
+                role="tab"
+                aria-selected="false"
+                data-right-tab="motor"
+              >
+                Motor
+              </button>
+            </nav>
+            <div class="right-tab-panels">
+            <div
+              id="right-tab-pane-bridge"
+              class="right-tab-pane right-tab-pane--active"
+              role="tabpanel"
+            >
+            <div id="panel-bridge" class="control-card">
+              <h3 class="control-card-title">Bridge (WebSocket)</h3>
+              <label class="field-label" for="ws-url">Server URL</label>
+              <input
+                id="ws-url"
+                type="text"
+                class="field-input field-input-wide"
+                value="ws://127.0.0.1:8765/ws"
+                spellcheck="false"
+              />
+              <div class="btn-row">
+                <button type="button" id="btn-ws-connect" class="btn btn-primary">
+                  Connect
+                </button>
+                <button type="button" id="btn-ws-disconnect" class="btn btn-secondary">
+                  Disconnect
+                </button>
+              </div>
+            </div>
+            </div>
+
+            <div
+              id="right-tab-pane-calibration"
+              class="right-tab-pane"
+              role="tabpanel"
+              hidden
+            >
+            <div id="panel-calibration" class="control-card control-card-calibration">
+              <h3 class="control-card-title">Distance calibration</h3>
+              <p class="calibration-hint">
+                Enable ROI mode, draw a region on the camera view, enter the real
+                distance, then Apply.
+              </p>
+              <label class="calibration-toggle">
+                <input id="calibrate-mode" type="checkbox" />
+                Draw calibration ROI
+              </label>
+              <label class="calibration-invert">
+                <input id="calibration-invert" type="checkbox" />
+                Invert depth map
+              </label>
+              <div class="calibration-actions">
+                <label class="cal-ref-label">
+                  Reference distance (m)
+                  <input
+                    id="calibration-distance"
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value="2"
+                    disabled
+                  />
+                </label>
+                <button type="button" id="calibration-apply" disabled>
+                  Apply
+                </button>
+                <button type="button" id="calibration-clear" disabled>
+                  Clear
+                </button>
+              </div>
+            </div>
+            </div>
+
+            <div
+              id="right-tab-pane-motor"
+              class="right-tab-pane"
+              role="tabpanel"
+              hidden
+            >
+            <div id="panel-motor" class="control-card throw-tuning-card">
+              <h3 class="control-card-title">Throw &amp; motor (Arduino)</h3>
+              <p class="calibration-hint throw-tuning-lead">
+                Sent to the MCU over serial via the bridge. Settings are stored in
+                this browser unless you clear site data.
+              </p>
+
+              <fieldset class="throw-fieldset" id="throw-mode-fieldset">
+                <legend class="throw-legend">Operating mode</legend>
+                <div class="throw-radio-row">
+                  <label class="throw-radio">
+                    <input
+                      type="radio"
+                      name="throw-mode"
+                      id="throw-mode-auto"
+                      value="auto"
+                      checked
+                    />
+                    <span><strong>Auto</strong> — use selected player distance and RPM from the bands table.</span>
+                  </label>
+                  <label class="throw-radio">
+                    <input
+                      type="radio"
+                      name="throw-mode"
+                      id="throw-mode-manual"
+                      value="manual"
+                    />
+                    <span><strong>Manual</strong> — fixed RPM while armed; feeder fires only when you command it (or auto-fire).</span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset class="throw-fieldset" id="throw-auto-hint">
+                <legend class="throw-legend">Auto mode</legend>
+                <p class="throw-help">
+                  Select a player token below. Distance updates every frame; RPM follows the
+                  highlighted band in the table.
+                </p>
+              </fieldset>
+
+              <fieldset class="throw-fieldset" id="throw-manual-fieldset" disabled>
+                <legend class="throw-legend">Manual — fixed RPM &amp; feed</legend>
+                <p class="throw-help">
+                  Arm the machine for a constant wheel speed. The feeder does not run on dwell;
+                  use <strong>Manual fire</strong> or enable <strong>Auto-fire</strong> (fires when
+                  speed matches target, on an interval).
+                </p>
+                <label class="field-label" for="throw-fixed-rpm">Fixed RPM</label>
+                <input
+                  id="throw-fixed-rpm"
+                  type="number"
+                  class="field-input field-input-wide"
+                  min="0"
+                  max="500"
+                  step="1"
+                  value="100"
+                />
+                <div class="throw-manual-fire-row">
+                  <button type="button" id="btn-manual-fire" class="btn btn-primary">
+                    Manual fire
+                  </button>
+                  <label class="throw-auto-fire-label">
+                    <input type="checkbox" id="throw-auto-fire" />
+                    Auto-fire when speed OK
+                  </label>
+                  <label class="throw-auto-fire-interval-label" for="throw-auto-fire-interval-s">
+                    Interval (s)
+                  </label>
+                  <input
+                    id="throw-auto-fire-interval-s"
+                    type="number"
+                    class="field-input"
+                    min="1"
+                    max="120"
+                    step="0.5"
+                    value="5"
+                  />
+                </div>
+              </fieldset>
+
+              <div class="band-block" id="throw-bands-wrap">
+                <label class="field-label" for="throw-band-count"
+                  >Number of distance bands</label
+                >
+                <select id="throw-band-count" class="field-input field-input-wide">
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3" selected>3</option>
+                  <option value="4">4</option>
+                  <option value="5">5</option>
+                  <option value="6">6</option>
+                </select>
+                <table class="band-table" aria-label="Distance to RPM bands">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Min (m)</th>
+                      <th>Max (m)</th>
+                      <th>RPM</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr id="throw-band-row-0">
+                      <td>1</td>
+                      <td>
+                        <input
+                          id="throw-band-0-min"
+                          type="number"
+                          step="0.01"
+                          class="band-input"
+                          value="0.55"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          id="throw-band-0-max"
+                          type="number"
+                          step="0.01"
+                          class="band-input"
+                          value="1.15"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          id="throw-band-0-rpm"
+                          type="number"
+                          step="1"
+                          class="band-input"
+                          value="50"
+                        />
+                      </td>
+                    </tr>
+                    <tr id="throw-band-row-1">
+                      <td>2</td>
+                      <td>
+                        <input
+                          id="throw-band-1-min"
+                          type="number"
+                          step="0.01"
+                          class="band-input"
+                          value="1.15"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          id="throw-band-1-max"
+                          type="number"
+                          step="0.01"
+                          class="band-input"
+                          value="2.2"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          id="throw-band-1-rpm"
+                          type="number"
+                          step="1"
+                          class="band-input"
+                          value="100"
+                        />
+                      </td>
+                    </tr>
+                    <tr id="throw-band-row-2">
+                      <td>3</td>
+                      <td>
+                        <input
+                          id="throw-band-2-min"
+                          type="number"
+                          step="0.01"
+                          class="band-input"
+                          value="2.2"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          id="throw-band-2-max"
+                          type="number"
+                          step="0.01"
+                          class="band-input"
+                          value="30"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          id="throw-band-2-rpm"
+                          type="number"
+                          step="1"
+                          class="band-input"
+                          value="150"
+                        />
+                      </td>
+                    </tr>
+                    <tr id="throw-band-row-3" class="band-row-extra">
+                      <td>4</td>
+                      <td>
+                        <input id="throw-band-3-min" type="number" step="0.01" class="band-input" />
+                      </td>
+                      <td>
+                        <input id="throw-band-3-max" type="number" step="0.01" class="band-input" />
+                      </td>
+                      <td>
+                        <input id="throw-band-3-rpm" type="number" step="1" class="band-input" />
+                      </td>
+                    </tr>
+                    <tr id="throw-band-row-4" class="band-row-extra">
+                      <td>5</td>
+                      <td>
+                        <input id="throw-band-4-min" type="number" step="0.01" class="band-input" />
+                      </td>
+                      <td>
+                        <input id="throw-band-4-max" type="number" step="0.01" class="band-input" />
+                      </td>
+                      <td>
+                        <input id="throw-band-4-rpm" type="number" step="1" class="band-input" />
+                      </td>
+                    </tr>
+                    <tr id="throw-band-row-5" class="band-row-extra">
+                      <td>6</td>
+                      <td>
+                        <input id="throw-band-5-min" type="number" step="0.01" class="band-input" />
+                      </td>
+                      <td>
+                        <input id="throw-band-5-max" type="number" step="0.01" class="band-input" />
+                      </td>
+                      <td>
+                        <input id="throw-band-5-rpm" type="number" step="1" class="band-input" />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div class="btn-row">
+                  <button type="button" id="btn-mcu-bands-reset" class="btn btn-secondary">
+                    Reset MCU bands (firmware defaults)
+                  </button>
+                </div>
+              </div>
+
+              <details class="nested-details throw-advanced">
+                <summary>Timing, feed &amp; PI gains</summary>
+                <div class="controls-grid throw-tuning-grid">
+                  <div>
+                    <label for="throw-dwell-ms">Dwell (ms)</label>
+                    <input
+                      id="throw-dwell-ms"
+                      type="number"
+                      min="50"
+                      max="5000"
+                      step="10"
+                      value="280"
+                    />
+                  </div>
+                  <div>
+                    <label for="throw-feed-ms">Feed hold (ms)</label>
+                    <input
+                      id="throw-feed-ms"
+                      type="number"
+                      min="50"
+                      max="2000"
+                      step="10"
+                      value="220"
+                    />
+                  </div>
+                  <div>
+                    <label for="throw-cooldown-ms">Cooldown (ms)</label>
+                    <input
+                      id="throw-cooldown-ms"
+                      type="number"
+                      min="100"
+                      max="10000"
+                      step="50"
+                      value="900"
+                    />
+                  </div>
+                  <div>
+                    <label for="throw-kp">Kp</label>
+                    <input
+                      id="throw-kp"
+                      type="number"
+                      min="0.01"
+                      max="100"
+                      step="0.05"
+                      value="2.8"
+                    />
+                  </div>
+                  <div>
+                    <label for="throw-ki">Ki</label>
+                    <input
+                      id="throw-ki"
+                      type="number"
+                      min="0"
+                      max="50"
+                      step="0.01"
+                      value="0.35"
+                    />
+                  </div>
+                  <div>
+                    <label for="throw-pwm-max">PWM max</label>
+                    <input
+                      id="throw-pwm-max"
+                      type="number"
+                      min="10"
+                      max="255"
+                      step="1"
+                      value="220"
+                    />
+                  </div>
+                  <div>
+                    <label for="throw-rpm-tol">RPM match tolerance (ratio)</label>
+                    <input
+                      id="throw-rpm-tol"
+                      type="number"
+                      min="0.01"
+                      max="0.5"
+                      step="0.01"
+                      value="0.08"
+                    />
+                  </div>
+                  <div>
+                    <label for="throw-stall-pwm">Stall detect PWM</label>
+                    <input
+                      id="throw-stall-pwm"
+                      type="number"
+                      min="10"
+                      max="255"
+                      step="1"
+                      value="160"
+                    />
+                  </div>
+                  <div>
+                    <label for="throw-stall-rpm">Stall detect RPM</label>
+                    <input
+                      id="throw-stall-rpm"
+                      type="number"
+                      min="1"
+                      max="100"
+                      step="0.5"
+                      value="8"
+                    />
+                  </div>
+                </div>
+              </details>
+
+              <fieldset class="throw-fieldset">
+                <legend class="throw-legend">Player bar (display only)</legend>
+                <p class="calibration-hint">
+                  Scales the distance indicator under each player token.
+                </p>
+                <div class="throw-viz-row">
+                  <label class="throw-viz-pair" for="throw-viz-min"
+                    >Min (m)
+                    <input id="throw-viz-min" type="number" step="0.1" min="0" value="0.5" />
+                  </label>
+                  <label class="throw-viz-pair" for="throw-viz-max"
+                    >Max (m)
+                    <input id="throw-viz-max" type="number" step="0.1" min="0.1" value="12" />
+                  </label>
+                </div>
+              </fieldset>
+            </div>
+
+            <details class="engineering-panel">
+              <summary class="engineering-summary">
+                <span class="engineering-icon" aria-hidden="true"></span>
+                <span>Detection tuning</span>
+              </summary>
+              <div class="engineering-body">
+                <div class="controls-grid">
+                  <div>
+                    <label for="size"
+                      >Detection size <span id="size-value">128</span></label
+                    >
+                    <input
+                      id="size"
+                      type="range"
+                      min="64"
+                      max="256"
+                      step="32"
+                      value="128"
+                      disabled
+                    />
+                  </div>
+                  <div>
+                    <label for="threshold"
+                      >Confidence threshold
+                      <span id="threshold-value">0.25</span></label
+                    >
+                    <input
+                      id="threshold"
+                      type="range"
+                      min="0.01"
+                      max="1"
+                      step="0.01"
+                      value="0.25"
+                      disabled
+                    />
+                  </div>
+                  <div>
+                    <label for="scale"
+                      >Preview scale <span id="scale-value">0.5</span></label
+                    >
+                    <input
+                      id="scale"
+                      type="range"
+                      min="0.01"
+                      max="1"
+                      step="0.01"
+                      value="0.5"
+                      disabled
+                    />
+                  </div>
+                  <div>
+                    <label for="depth-size"
+                      >Depth input size <span id="depth-size-value">504</span></label
+                    >
+                    <input
+                      id="depth-size"
+                      type="range"
+                      min="140"
+                      max="840"
+                      step="14"
+                      value="504"
+                      disabled
+                    />
+                  </div>
+                </div>
+                <div class="preset-row">
+                  <button type="button" class="btn btn-small" data-preset="indoor">
+                    Indoor preset
+                  </button>
+                  <button type="button" class="btn btn-small" data-preset="outdoor">
+                    Outdoor preset
+                  </button>
+                </div>
+              </div>
+            </details>
+            </div>
+            </div>
+          </aside>
+        </div>
+      </main>
+    </div>
+
+    <div id="toast-host" class="toast-host" aria-live="assertive"></div>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
