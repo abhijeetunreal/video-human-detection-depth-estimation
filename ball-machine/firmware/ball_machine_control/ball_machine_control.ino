@@ -1,10 +1,10 @@
 /**
- * Ball thrower: AS5600 RPM, BTS7960B (single-direction PWM), feeder servo.
- * Serial 115200: TARGET_M, TARGET_RPM, AUTO_RPM, SET_BAND*, ARM, DISARM, STOP, SET_* tuning
- * Telemetry: STATE, RPM, TARGET_RPM, DIST_M, ERR
+ * Ball thrower: IR slot/reflection RPM (interrupt), BTS7960B (single-direction PWM), feeder servo.
+ * Serial 115200: TARGET_M, TARGET_RPM [min [max]], AUTO_RPM, SET_BAND*, ARM, DISARM, STOP,
+ *   TEST_MODE 0|1, TEST_PWM <0..PWM_MAX>, SET_* tuning
+ * Telemetry: STATE, RPM, TARGET_RPM, TARGET_RPM_MIN, TARGET_RPM_MAX, DIST_M, ERR
  */
 
-#include <Wire.h>
 #include <Servo.h>
 
 // --- Pin map (adjust for your wiring) ---
@@ -14,10 +14,17 @@ static const uint8_t PIN_LPWM = 3;
 static const uint8_t PIN_REN = 7;
 static const uint8_t PIN_LEN = 8;
 static const uint8_t PIN_SERVO = 9;
+// IR RPM (FC-51-style); Uno/Nano: use pin 2 or 3 for external interrupt.
+static const uint8_t PIN_IR_RPM = 2;
 
-// AS5600
-static const uint8_t AS5600_ADDR = 0x36;
-static const uint8_t REG_RAW_ANGLE_H = 0x0C;
+// IR wheel: marks/slots per full revolution (must match physical wheel).
+static const int pulsesPerRevolution = 20;
+// ~20% above max motor speed — rejects impossible glitch intervals.
+static const float maxExpectedRPM = 500.0f;
+static const unsigned long minPulseInterval =
+    (unsigned long)((60000000.0 / (double)maxExpectedRPM) / (double)pulsesPerRevolution);
+static const float rpmEmaAlpha = 0.3f;
+static const unsigned long rpmPulseTimeoutUs = 500000UL;
 
 // Timing (defaults; runtime-tunable via serial SET_*)
 static const uint32_t TELEMETRY_MS = 120;
@@ -29,27 +36,32 @@ static const uint32_t STALL_CHECK_MS = 2000;
 static float g_stallPwmThreshold = 160.0f;
 static float g_stallRpmThreshold = 8.0f;
 
-// Distance bands: [min_m, max_m) -> target RPM (tunable via SET_BAND / SET_BAND_COUNT)
+// Distance bands: [min_m, max_m) -> [rpm_min, rpm_max] RPM window (SET_BAND idx m0 m1 r0 r1)
 #define MAX_BANDS 6
 struct Band {
   float minM;
   float maxM;
-  int rpm;
+  int rpmMin;
+  int rpmMax;
 };
 
 static Band distBands[MAX_BANDS] = {
-    {0.55f, 1.15f, 50},
-    {1.15f, 2.20f, 100},
-    {2.20f, 30.0f, 150},
-    {0.0f, 0.0f, 0},
-    {0.0f, 0.0f, 0},
-    {0.0f, 0.0f, 0},
+    {0.55f, 1.15f, 45, 55},
+    {1.15f, 2.20f, 90, 110},
+    {2.20f, 30.0f, 140, 160},
+    {0.0f, 0.0f, 0, 0},
+    {0.0f, 0.0f, 0, 0},
+    {0.0f, 0.0f, 0, 0},
 };
 static int numBands = 3;
 
 static bool manualRpmOverride = false;
 /** When false, dwell never auto-triggers FEEDING — use FEED_ONCE from host */
 static bool g_autoFeedFromDwell = true;
+
+/** Open-loop bench test: direct PWM; blocks other serial commands until TEST_MODE 0 / STOP / DISARM */
+static bool g_testMode = false;
+static float g_testPwm = 0.0f;
 
 // PI gains (tune on hardware; SET_KP / SET_KI / ...)
 static float g_kp = 2.8f;
@@ -70,6 +82,8 @@ Servo feeder;
 bool armed = false;
 float targetDistM = 0.0f;
 int targetRpm = 0;
+int targetRpmMin = 0;
+int targetRpmMax = 0;
 
 float rpmMeasured = 0.0f;
 float integral = 0.0f;
@@ -77,9 +91,11 @@ float pwmOut = 0.0f;
 
 RunState state = ST_IDLE;
 uint32_t lastTelemMs = 0;
-uint32_t lastRpmMs = 0;
-uint16_t lastAngle = 0;
-bool angleInit = false;
+
+volatile unsigned long lastIrPulseUs = 0;
+volatile unsigned long irPulseIntervalUs = 0;
+volatile bool irNewPulse = false;
+volatile bool irIsFirstPulse = true;
 
 uint32_t dwellAccumMs = 0;
 uint32_t feedPhaseMs = 0;
@@ -93,40 +109,53 @@ uint32_t lastControlMs = 0;
 
 String rxLine;
 
-static uint16_t readAngleRaw() {
-  Wire.beginTransmission(AS5600_ADDR);
-  Wire.write(REG_RAW_ANGLE_H);
-  if (Wire.endTransmission(false) != 0) return 0xFFFF;
-  if (Wire.requestFrom((int)AS5600_ADDR, 2) != 2) return 0xFFFF;
-  uint8_t h = Wire.read();
-  uint8_t l = Wire.read();
-  return ((uint16_t)h << 8 | l) & 0x0FFF;
+static void recordIrPulse() {
+  unsigned long t = micros();
+  unsigned long dt = t - lastIrPulseUs;
+
+  if (irIsFirstPulse) {
+    lastIrPulseUs = t;
+    irIsFirstPulse = false;
+    return;
+  }
+  if (dt > minPulseInterval) {
+    irPulseIntervalUs = dt;
+    lastIrPulseUs = t;
+    irNewPulse = true;
+  }
 }
 
-static int distanceToTargetRpm(float m) {
-  if (m < 0.05f) return 0;
+/** Auto mode: set targetRpmMin/Max and midpoint targetRpm from distance bands. */
+static void applyBandForDistance(float m) {
+  targetRpmMin = 0;
+  targetRpmMax = 0;
+  targetRpm = 0;
+  if (m < 0.05f) return;
   for (int i = 0; i < numBands; ++i) {
     if (m >= distBands[i].minM && m < distBands[i].maxM) {
-      return distBands[i].rpm;
+      targetRpmMin = distBands[i].rpmMin;
+      targetRpmMax = distBands[i].rpmMax;
+      if (targetRpmMax <= 0) return;
+      targetRpm = (targetRpmMin + targetRpmMax) / 2;
+      return;
     }
   }
-  return 0;
 }
 
 static void bandsResetDefaults() {
-  distBands[0] = {0.55f, 1.15f, 50};
-  distBands[1] = {1.15f, 2.20f, 100};
-  distBands[2] = {2.20f, 30.0f, 150};
+  distBands[0] = {0.55f, 1.15f, 45, 55};
+  distBands[1] = {1.15f, 2.20f, 90, 110};
+  distBands[2] = {2.20f, 30.0f, 140, 160};
   for (int i = 3; i < MAX_BANDS; ++i) {
-    distBands[i] = {0.0f, 0.0f, 0};
+    distBands[i] = {0.0f, 0.0f, 0, 0};
   }
   numBands = 3;
   if (!manualRpmOverride) {
-    targetRpm = distanceToTargetRpm(targetDistM);
+    applyBandForDistance(targetDistM);
   }
 }
 
-/** Full line: SET_BAND idx min max rpm */
+/** Full line: SET_BAND idx min_m max_m rpm_min rpm_max */
 static void handleSetBandLine(const String& s) {
   if (!s.startsWith(F("SET_BAND"))) return;
   String rest = s.substring(8);
@@ -145,16 +174,25 @@ static void handleSetBandLine(const String& s) {
   int c = r3.indexOf(' ');
   if (c < 0) return;
   float mx = r3.substring(0, c).toFloat();
-  int rpm = r3.substring(c + 1).toInt();
+  String r4 = r3.substring(c + 1);
+  r4.trim();
+  int d = r4.indexOf(' ');
+  if (d < 0) return;
+  int rpmMin = r4.substring(0, d).toInt();
+  int rpmMax = r4.substring(d + 1).toInt();
   if (mn >= mx || mn < 0.0f || mx > 120.0f) return;
-  if (rpm < 0) rpm = 0;
-  if (rpm > 500) rpm = 500;
+  if (rpmMin < 0) rpmMin = 0;
+  if (rpmMax < 0) rpmMax = 0;
+  if (rpmMin > 500) rpmMin = 500;
+  if (rpmMax > 500) rpmMax = 500;
+  if (rpmMin > rpmMax) return;
   distBands[idx].minM = mn;
   distBands[idx].maxM = mx;
-  distBands[idx].rpm = rpm;
+  distBands[idx].rpmMin = rpmMin;
+  distBands[idx].rpmMax = rpmMax;
   if (idx + 1 > numBands) numBands = idx + 1;
   if (!manualRpmOverride) {
-    targetRpm = distanceToTargetRpm(targetDistM);
+    applyBandForDistance(targetDistM);
   }
 }
 
@@ -176,6 +214,27 @@ static void setState(RunState s) {
 }
 
 static void reportTelemetry() {
+  if (g_testMode) {
+    Serial.print(F("STATE "));
+    Serial.println(F("TEST"));
+    Serial.print(F("RPM "));
+    Serial.println(rpmMeasured, 2);
+    Serial.print(F("TARGET_RPM "));
+    Serial.println((int)(g_testPwm + 0.5f));
+    Serial.print(F("TARGET_RPM_MIN "));
+    Serial.println(0);
+    Serial.print(F("TARGET_RPM_MAX "));
+    Serial.println(0);
+    Serial.print(F("DIST_M "));
+    Serial.println(0.0f, 3);
+    if (errMsg.length() > 0) {
+      Serial.print(F("ERR "));
+      Serial.println(errMsg);
+      errMsg = "";
+    }
+    return;
+  }
+
   Serial.print(F("STATE "));
   switch (state) {
     case ST_IDLE:
@@ -202,6 +261,12 @@ static void reportTelemetry() {
   Serial.print(F("TARGET_RPM "));
   Serial.println(targetRpm);
 
+  Serial.print(F("TARGET_RPM_MIN "));
+  Serial.println(targetRpmMin);
+
+  Serial.print(F("TARGET_RPM_MAX "));
+  Serial.println(targetRpmMax);
+
   Serial.print(F("DIST_M "));
   Serial.println(targetDistM, 3);
 
@@ -216,6 +281,77 @@ static void handleCommand(const String& line) {
   String s = line;
   s.trim();
   if (s.length() == 0) return;
+
+  String upper = s;
+  upper.toUpperCase();
+
+  if (s == F("STOP")) {
+    g_testMode = false;
+    g_testPwm = 0.0f;
+    armed = false;
+    motorStop();
+    pwmOut = 0.0f;
+    integral = 0.0f;
+    dwellAccumMs = 0;
+    stallAccumMs = 0;
+    feedStep = 0;
+    feeder.write(0);
+    setState(ST_IDLE);
+    return;
+  }
+
+  if (upper.startsWith(F("TEST_MODE"))) {
+    int sp = upper.indexOf(' ');
+    if (sp < 0) return;
+    int v = upper.substring(sp + 1).toInt();
+    if (v != 0) {
+      g_testMode = true;
+      g_testPwm = 0.0f;
+      armed = false;
+      integral = 0.0f;
+      dwellAccumMs = 0;
+      stallAccumMs = 0;
+      feedStep = 0;
+      feeder.write(0);
+      pwmOut = 0.0f;
+      motorStop();
+      if (state != ST_FAULT) setState(ST_IDLE);
+      Serial.println(F("ACK TEST_MODE 1"));
+    } else {
+      g_testMode = false;
+      g_testPwm = 0.0f;
+      motorStop();
+      pwmOut = 0.0f;
+      Serial.println(F("ACK TEST_MODE 0"));
+    }
+    return;
+  }
+
+  if (upper.startsWith(F("TEST_PWM"))) {
+    int sp = upper.indexOf(' ');
+    if (sp < 0) return;
+    float p = upper.substring(sp + 1).toFloat();
+    if (p < 0.0f) p = 0.0f;
+    if (p > g_pwmMax) p = g_pwmMax;
+    g_testPwm = p;
+    return;
+  }
+
+  if (g_testMode) {
+    if (s == F("DISARM")) {
+      g_testMode = false;
+      g_testPwm = 0.0f;
+      armed = false;
+      motorStop();
+      pwmOut = 0.0f;
+      integral = 0.0f;
+      dwellAccumMs = 0;
+      feeder.write(0);
+      if (state != ST_FAULT) setState(ST_IDLE);
+      return;
+    }
+    return;
+  }
 
   if (s == F("ARM")) {
     armed = true;
@@ -236,19 +372,8 @@ static void handleCommand(const String& line) {
     if (state != ST_FAULT) setState(ST_IDLE);
     return;
   }
-  if (s == F("STOP")) {
-    armed = false;
-    motorStop();
-    pwmOut = 0;
-    integral = 0.0f;
-    dwellAccumMs = 0;
-    feedStep = 0;
-    feeder.write(0);
-    setState(ST_IDLE);
-    return;
-  }
   if (s == F("FEED_ONCE")) {
-    if (!armed || targetRpm <= 0) return;
+    if (!armed || targetRpmMax <= 0) return;
     if (state == ST_FAULT) return;
     if (state == ST_FEEDING || state == ST_COOLDOWN) return;
     feedStep = 0;
@@ -265,12 +390,33 @@ static void handleCommand(const String& line) {
     return;
   }
   if (s.startsWith(F("TARGET_RPM"))) {
-    int sp = s.indexOf(' ');
-    if (sp < 0) return;
-    int r = s.substring(sp + 1).toInt();
-    if (r < 0) r = 0;
-    if (r > 500) r = 500;
-    targetRpm = r;
+    String rest = s.substring(10);
+    rest.trim();
+    if (rest.length() == 0) return;
+    int sp = rest.indexOf(' ');
+    int r0;
+    int r1;
+    if (sp < 0) {
+      r0 = rest.toInt();
+      r1 = r0;
+    } else {
+      r0 = rest.substring(0, sp).toInt();
+      String r2 = rest.substring(sp + 1);
+      r2.trim();
+      r1 = r2.toInt();
+    }
+    if (r0 < 0) r0 = 0;
+    if (r1 < 0) r1 = 0;
+    if (r0 > 500) r0 = 500;
+    if (r1 > 500) r1 = 500;
+    if (r0 > r1) {
+      int t = r0;
+      r0 = r1;
+      r1 = t;
+    }
+    targetRpmMin = r0;
+    targetRpmMax = r1;
+    targetRpm = (targetRpmMin + targetRpmMax) / 2;
     manualRpmOverride = true;
     integral = 0.0f;
     dwellAccumMs = 0;
@@ -281,7 +427,7 @@ static void handleCommand(const String& line) {
   }
   if (s == F("AUTO_RPM")) {
     manualRpmOverride = false;
-    targetRpm = distanceToTargetRpm(targetDistM);
+    applyBandForDistance(targetDistM);
     integral = 0.0f;
     dwellAccumMs = 0;
     if (armed && state != ST_FEEDING && state != ST_COOLDOWN && state != ST_FAULT) {
@@ -296,7 +442,7 @@ static void handleCommand(const String& line) {
     if (n >= 1 && n <= MAX_BANDS) {
       numBands = n;
       if (!manualRpmOverride) {
-        targetRpm = distanceToTargetRpm(targetDistM);
+        applyBandForDistance(targetDistM);
       }
     }
     return;
@@ -379,7 +525,7 @@ static void handleCommand(const String& line) {
     if (v < 0.0f || v > 80.0f) return;
     targetDistM = v;
     if (!manualRpmOverride) {
-      targetRpm = distanceToTargetRpm(targetDistM);
+      applyBandForDistance(targetDistM);
     }
     integral = 0.0f;
     dwellAccumMs = 0;
@@ -390,31 +536,28 @@ static void handleCommand(const String& line) {
   }
 }
 
-static void updateRpm(uint32_t now) {
-  if (now - lastRpmMs < RPM_SAMPLE_MS) return;
-  uint32_t dt = now - lastRpmMs;
-  lastRpmMs = now;
+static void updateRpm(uint32_t) {
+  if (irNewPulse) {
+    noInterrupts();
+    unsigned long interval = irPulseIntervalUs;
+    irNewPulse = false;
+    interrupts();
 
-  uint16_t ang = readAngleRaw();
-  if (ang == 0xFFFF) {
-    return;
-  }
-  if (!angleInit) {
-    lastAngle = ang;
-    angleInit = true;
-    return;
+    if (interval > 0) {
+      float instantRpm = (60000000.0f / (float)interval) / (float)pulsesPerRevolution;
+      rpmMeasured = rpmEmaAlpha * instantRpm + (1.0f - rpmEmaAlpha) * rpmMeasured;
+    }
   }
 
-  int32_t d = (int32_t)ang - (int32_t)lastAngle;
-  if (d > 2048) d -= 4096;
-  if (d < -2048) d += 4096;
-  lastAngle = ang;
+  unsigned long since;
+  noInterrupts();
+  since = micros() - lastIrPulseUs;
+  interrupts();
 
-  if (dt == 0) return;
-  float rev = (float)d / 4096.0f;
-  float rps = rev / ((float)dt / 1000.0f);
-  float instant = rps * 60.0f;
-  rpmMeasured = rpmMeasured * 0.65f + instant * 0.35f;
+  if (since > rpmPulseTimeoutUs && rpmMeasured > 0.0f) {
+    rpmMeasured = 0.0f;
+    irIsFirstPulse = true;
+  }
 }
 
 static void updateControl(uint32_t now) {
@@ -422,7 +565,7 @@ static void updateControl(uint32_t now) {
   uint32_t dt = now - lastControlMs;
   lastControlMs = now;
 
-  if (!armed || targetRpm <= 0) {
+  if (!armed || targetRpmMax <= 0) {
     motorStop();
     pwmOut = 0;
     integral = 0.0f;
@@ -443,7 +586,19 @@ static void updateControl(uint32_t now) {
     return;
   }
 
-  float err = (float)targetRpm - rpmMeasured;
+  int lo = targetRpmMin;
+  int hi = targetRpmMax;
+  float err;
+  if (lo == hi) {
+    err = (float)lo - rpmMeasured;
+  } else if (rpmMeasured < (float)lo) {
+    err = (float)lo - rpmMeasured;
+  } else if (rpmMeasured > (float)hi) {
+    err = (float)hi - rpmMeasured;
+  } else {
+    err = 0.0f;
+  }
+
   integral += err * ((float)dt / 1000.0f);
   if (integral > 120.0f) integral = 120.0f;
   if (integral < -120.0f) integral = -120.0f;
@@ -452,9 +607,14 @@ static void updateControl(uint32_t now) {
   if (pwmOut > g_pwmMax) pwmOut = g_pwmMax;
   motorPwmForward(pwmOut);
 
-  float tol = (float)targetRpm * g_rpmTolRatio;
-  if (tol < 2.0f) tol = 2.0f;
-  bool inBand = fabs(err) <= tol;
+  bool inBand;
+  if (lo == hi) {
+    float tol = (float)lo * g_rpmTolRatio;
+    if (tol < 2.0f) tol = 2.0f;
+    inBand = fabs((float)lo - rpmMeasured) <= tol;
+  } else {
+    inBand = rpmMeasured >= (float)lo && rpmMeasured <= (float)hi;
+  }
 
   if (inBand) {
     dwellAccumMs += dt;
@@ -504,7 +664,7 @@ static void updateFeeder(uint32_t now) {
 
   if (state == ST_COOLDOWN) {
     if (now - cooldownStartMs >= g_cooldownPeriodMs) {
-      if (armed && targetRpm > 0) {
+      if (armed && targetRpmMax > 0) {
         setState(ST_SPINUP);
       } else {
         setState(ST_IDLE);
@@ -523,12 +683,13 @@ void setup() {
   pinMode(PIN_LPWM, OUTPUT);
   motorStop();
 
-  Wire.begin();
+  pinMode(PIN_IR_RPM, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_IR_RPM), recordIrPulse, FALLING);
+
   feeder.attach(PIN_SERVO);
   feeder.write(0);
 
   uint32_t t0 = millis();
-  lastRpmMs = t0;
   lastTelemMs = t0;
   lastControlMs = t0;
 }
@@ -548,8 +709,14 @@ void loop() {
   }
 
   updateRpm(now);
-  updateFeeder(now);
-  updateControl(now);
+  if (g_testMode) {
+    motorPwmForward(g_testPwm);
+    pwmOut = g_testPwm;
+    feeder.write(0);
+  } else {
+    updateFeeder(now);
+    updateControl(now);
+  }
 
   if (now - lastTelemMs >= TELEMETRY_MS) {
     lastTelemMs = now;

@@ -25,6 +25,8 @@ class SerialTelemetry:
         self.state: str = "IDLE"
         self.rpm: float | None = None
         self.target_rpm: int | None = None
+        self.target_rpm_min: int | None = None
+        self.target_rpm_max: int | None = None
         self.dist_m: float | None = None
         self.err: str | None = None
         self.serial_open: bool = False
@@ -53,6 +55,8 @@ class SerialTelemetry:
             "state": self.state,
             "rpm": self.rpm,
             "target_rpm": self.target_rpm,
+            "target_rpm_min": self.target_rpm_min,
+            "target_rpm_max": self.target_rpm_max,
             "dist_m": self.dist_m,
             "err": self.err,
             "serial_open": self.serial_open,
@@ -75,6 +79,10 @@ class SerialTelemetry:
                 self.rpm = float(rest.strip())
             elif key == "TARGET_RPM":
                 self.target_rpm = int(float(rest.strip()))
+            elif key == "TARGET_RPM_MIN":
+                self.target_rpm_min = int(float(rest.strip()))
+            elif key == "TARGET_RPM_MAX":
+                self.target_rpm_max = int(float(rest.strip()))
             elif key == "DIST_M":
                 self.dist_m = float(rest.strip())
             elif key == "ERR":
@@ -95,6 +103,7 @@ def create_app(
 
     last_bands_sig: str | None = None
     last_tuning_sig: str | None = None
+    last_test_on: bool = False
 
     ser: serial.Serial | None = None
     stop_reader = threading.Event()
@@ -125,6 +134,7 @@ def create_app(
             if ser and ser.is_open:
                 try:
                     ser.write(text.encode("ascii", errors="ignore"))
+                    ser.flush()
                 except OSError as e:
                     logger.warning("Serial write failed: %s", e)
 
@@ -142,10 +152,18 @@ def create_app(
             try:
                 mn = float(b["min_m"])
                 mx = float(b["max_m"])
-                rpm = int(b["rpm"])
             except (KeyError, TypeError, ValueError):
                 continue
-            serial_write(f"SET_BAND {i} {mn:.3f} {mx:.3f} {rpm}\n")
+            try:
+                r0 = int(b["rpm_min"])
+                r1 = int(b["rpm_max"])
+            except (KeyError, TypeError, ValueError):
+                try:
+                    r0 = int(b["rpm"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                r1 = r0
+            serial_write(f"SET_BAND {i} {mn:.3f} {mx:.3f} {r0} {r1}\n")
         n = min(len(bands), 6)
         if n >= 1:
             serial_write(f"SET_BAND_COUNT {n}\n")
@@ -219,7 +237,7 @@ def create_app(
             buf.extend(chunk)
             while b"\n" in buf:
                 idx = buf.index(b"\n")
-                line = bytes(buf[:idx]).decode("ascii", errors="ignore")
+                line = bytes(buf[:idx]).decode("ascii", errors="ignore").strip("\r")
                 del buf[: idx + 1]
                 telemetry.push_serial_line(line)
                 telemetry.ingest_line(line)
@@ -276,7 +294,7 @@ def create_app(
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
-        nonlocal last_bands_sig, last_tuning_sig
+        nonlocal last_bands_sig, last_tuning_sig, last_test_on
         await ws.accept()
         telemetry.push_bridge_line(
             "INFO: WebSocket /ws accepted — telemetry + control (bridge)"
@@ -306,6 +324,36 @@ def create_app(
                     serial_write("FEED_ONCE\n")
                     continue
 
+                test_on = bool(data.get("test_mode", False))
+                tun_raw = data.get("tuning")
+                tuning_for_test: dict[str, Any] = (
+                    tun_raw if isinstance(tun_raw, dict) else {}
+                )
+                try:
+                    pwm_max = float(tuning_for_test.get("pwm_max", 220))
+                except (TypeError, ValueError):
+                    pwm_max = 220.0
+                if pwm_max < 10.0 or pwm_max > 255.0:
+                    pwm_max = 220.0
+                try:
+                    pct = float(data.get("test_pwm", 0))
+                except (TypeError, ValueError):
+                    pct = 0.0
+                pct = max(0.0, min(100.0, pct))
+                pwm_cmd = int(pwm_max * (pct / 100.0) + 0.5)
+
+                if test_on:
+                    if not last_test_on:
+                        telemetry.push_bridge_line("INFO: Motor test mode ON (TEST_MODE 1)")
+                        serial_write("TEST_MODE 1\n")
+                        last_test_on = True
+                    serial_write(f"TEST_PWM {pwm_cmd}\n")
+                    continue
+                if last_test_on:
+                    telemetry.push_bridge_line("INFO: Motor test mode OFF (TEST_MODE 0)")
+                    serial_write("TEST_MODE 0\n")
+                    last_test_on = False
+
                 send_bands_if_changed(data.get("bands"))
                 send_tuning_if_changed(data.get("tuning"))
 
@@ -330,9 +378,25 @@ def create_app(
                     serial_write(f"TARGET_M {m:.3f}\n")
                     if rpm_mode == "manual" and manual_rpm is not None:
                         try:
-                            r = int(float(manual_rpm))
-                            r = max(0, min(500, r))
-                            serial_write(f"TARGET_RPM {r}\n")
+                            if isinstance(manual_rpm, (list, tuple)) and len(manual_rpm) >= 2:
+                                r0 = max(0, min(500, int(float(manual_rpm[0]))))
+                                r1 = max(0, min(500, int(float(manual_rpm[1]))))
+                                if r0 > r1:
+                                    r0, r1 = r1, r0
+                                serial_write(f"TARGET_RPM {r0} {r1}\n")
+                            elif (
+                                isinstance(manual_rpm, dict)
+                                and "rpm_min" in manual_rpm
+                                and "rpm_max" in manual_rpm
+                            ):
+                                r0 = max(0, min(500, int(float(manual_rpm["rpm_min"]))))
+                                r1 = max(0, min(500, int(float(manual_rpm["rpm_max"]))))
+                                if r0 > r1:
+                                    r0, r1 = r1, r0
+                                serial_write(f"TARGET_RPM {r0} {r1}\n")
+                            else:
+                                r = max(0, min(500, int(float(manual_rpm))))
+                                serial_write(f"TARGET_RPM {r}\n")
                         except (TypeError, ValueError):
                             serial_write("AUTO_RPM\n")
                     else:

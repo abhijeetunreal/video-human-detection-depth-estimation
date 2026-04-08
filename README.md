@@ -53,7 +53,7 @@ End-to-end flow:
 
 | Doc | Contents |
 |-----|----------|
-| [`ball-machine/README.md`](ball-machine/README.md) | Quick start, bridge usage, protocol, BTS7960/AS5600/servo notes |
+| [`ball-machine/README.md`](ball-machine/README.md) | Quick start, bridge usage, protocol, BTS7960/IR RPM/servo notes |
 | [`ball-machine/web/README.md`](ball-machine/web/README.md) | Static dashboard; CDN Transformers.js; no Node |
 | [`ball-machine/firmware/README.md`](ball-machine/firmware/README.md) | Default pins, `DIST_BANDS`, serial commands |
 

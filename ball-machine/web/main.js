@@ -25,14 +25,14 @@ const THEME_STORAGE_KEY = "ballMachineUiTheme";
 const THROW_CONFIG_KEY = "ballMachineThrowConfig_v2";
 const THROW_CONFIG_KEY_LEGACY = "ballMachineThrowConfig_v1";
 
-/** @type {Array<{ min_m: number, max_m: number, rpm: number }>} */
+/** @type {Array<{ min_m: number, max_m: number, rpm_min: number, rpm_max: number }>} */
 const DEFAULT_THROW_BANDS = [
-  { min_m: 0.55, max_m: 1.15, rpm: 50 },
-  { min_m: 1.15, max_m: 2.2, rpm: 100 },
-  { min_m: 2.2, max_m: 30, rpm: 150 },
-  { min_m: 0, max_m: 0, rpm: 0 },
-  { min_m: 0, max_m: 0, rpm: 0 },
-  { min_m: 0, max_m: 0, rpm: 0 },
+  { min_m: 0.55, max_m: 1.15, rpm_min: 45, rpm_max: 55 },
+  { min_m: 1.15, max_m: 2.2, rpm_min: 90, rpm_max: 110 },
+  { min_m: 2.2, max_m: 30, rpm_min: 140, rpm_max: 160 },
+  { min_m: 0, max_m: 0, rpm_min: 0, rpm_max: 0 },
+  { min_m: 0, max_m: 0, rpm_min: 0, rpm_max: 0 },
+  { min_m: 0, max_m: 0, rpm_min: 0, rpm_max: 0 },
 ];
 
 function defaultThrowTuning() {
@@ -119,7 +119,8 @@ const rpmBandHintEl = document.getElementById("rpm-band-hint");
 const toastHost = document.getElementById("toast-host");
 const throwModeAutoEl = document.getElementById("throw-mode-auto");
 const throwModeManualEl = document.getElementById("throw-mode-manual");
-const throwFixedRpmEl = document.getElementById("throw-fixed-rpm");
+const throwFixedRpmMinEl = document.getElementById("throw-fixed-rpm-min");
+const throwFixedRpmMaxEl = document.getElementById("throw-fixed-rpm-max");
 const throwManualFieldsetEl = document.getElementById("throw-manual-fieldset");
 const throwBandsWrapEl = document.getElementById("throw-bands-wrap");
 const throwAutoHintEl = document.getElementById("throw-auto-hint");
@@ -140,6 +141,12 @@ const throwAutoFireEl = document.getElementById("throw-auto-fire");
 const throwAutoFireIntervalEl = document.getElementById(
   "throw-auto-fire-interval-s",
 );
+const motorTestPanelEl = document.getElementById("motor-test-panel");
+const motorTestJumpLinkEl = document.getElementById("motor-test-jump-link");
+const motorTestEnableEl = document.getElementById("motor-test-enable");
+const motorTestSliderEl = document.getElementById("motor-test-slider");
+const motorTestPctEl = document.getElementById("motor-test-pct");
+const motorTestRpmEl = document.getElementById("motor-test-rpm");
 
 const throwTuningIds = [
   ["throw-dwell-ms", "dwell_ms"],
@@ -189,11 +196,13 @@ const EMA_ALPHA = 0.35;
 let selectedSlotIndex = null;
 let noPlayerDisarmTimer = 0;
 
-/** @type {{ state: string, rpm: number | null, target_rpm: number | null, dist_m: number | null, err: string | null, lastRx: number }} */
+/** @type {{ state: string, rpm: number | null, target_rpm: number | null, target_rpm_min: number | null, target_rpm_max: number | null, dist_m: number | null, err: string | null, lastRx: number }} */
 let telemetry = {
   state: "IDLE",
   rpm: null,
   target_rpm: null,
+  target_rpm_min: null,
+  target_rpm_max: null,
   dist_m: null,
   err: null,
   lastRx: 0,
@@ -245,7 +254,11 @@ function highlightLogLine(raw) {
   );
   out = out.replace(/\b(WebSocket)\b/gi, '<span class="log-token log-token-dim">$1</span>');
   out = out.replace(
-    /^(STATE|RPM|TARGET_RPM|DIST_M|ERR)\b/gm,
+    /^(STATE|RPM|TARGET_RPM|TARGET_RPM_MIN|TARGET_RPM_MAX|DIST_M|ERR)\b/gm,
+    '<span class="log-token log-token-mcu">$1</span>',
+  );
+  out = out.replace(
+    /\b(ACK TEST_MODE \d)\b/g,
     '<span class="log-token log-token-mcu">$1</span>',
   );
   return `<div class="log-line">${out}</div>`;
@@ -362,6 +375,7 @@ const MACHINE_CLASSES = [
   "machine-feeding",
   "machine-cooldown",
   "machine-fault",
+  "machine-test",
 ];
 
 let armAngleDeg = 0;
@@ -386,7 +400,7 @@ function updateBandRowVisibility() {
 
 /**
  * @param {number | null} m
- * @param {{ bandCount: number, bands: Array<{ min_m: number, max_m: number, rpm: number }> }} cfg
+ * @param {{ bandCount: number, bands: Array<{ min_m: number, max_m: number, rpm_min: number, rpm_max: number }> }} cfg
  */
 function findActiveBandIndex(m, cfg) {
   if (m == null || !Number.isFinite(m)) return -1;
@@ -442,9 +456,22 @@ function updateThrowLiveReadout() {
       mcuD != null && Number.isFinite(mcuD) ? `${mcuD.toFixed(2)} m` : "—";
   }
   const tr = telemetry.target_rpm;
+  const trLo = telemetry.target_rpm_min;
+  const trHi = telemetry.target_rpm_max;
   if (throwLiveRpmEl) {
-    throwLiveRpmEl.textContent =
-      tr != null && Number.isFinite(tr) ? String(tr) : "—";
+    if (
+      trLo != null &&
+      trHi != null &&
+      Number.isFinite(trLo) &&
+      Number.isFinite(trHi)
+    ) {
+      throwLiveRpmEl.textContent =
+        trLo === trHi ? String(trLo) : `${trLo}–${trHi}`;
+    } else if (tr != null && Number.isFinite(tr)) {
+      throwLiveRpmEl.textContent = String(tr);
+    } else {
+      throwLiveRpmEl.textContent = "—";
+    }
   }
 
   const distForBand =
@@ -455,7 +482,7 @@ function updateThrowLiveReadout() {
   if (throwLiveBandEl) {
     if (auto && bi >= 0) {
       const b = cfg.bands[bi];
-      throwLiveBandEl.textContent = `Row ${bi + 1}: ${b.min_m.toFixed(2)}–${b.max_m.toFixed(2)} m → ${b.rpm} RPM`;
+      throwLiveBandEl.textContent = `Row ${bi + 1}: ${b.min_m.toFixed(2)}–${b.max_m.toFixed(2)} m → ${b.rpm_min}–${b.rpm_max} RPM`;
     } else if (auto) {
       throwLiveBandEl.textContent =
         distForBand != null
@@ -480,7 +507,7 @@ function updateThrowLiveReadout() {
   if (h) {
     h.textContent = auto
       ? "Live — auto (player + bands)"
-      : "Live — manual (fixed RPM + fire)";
+      : "Live — manual (RPM range + fire)";
   }
 }
 
@@ -494,6 +521,28 @@ function migrateThrowConfig(cfg) {
     o.throwMode = o.rpmMode === "manual" ? "manual" : "auto";
   }
   if (o.fixedRpm == null) o.fixedRpm = o.manualRpm ?? 100;
+  if (o.fixedRpmMin == null && o.fixedRpmMax == null && o.fixedRpm != null) {
+    o.fixedRpmMin = o.fixedRpm;
+    o.fixedRpmMax = o.fixedRpm;
+  }
+  if (o.fixedRpmMin == null) o.fixedRpmMin = o.fixedRpm ?? 100;
+  if (o.fixedRpmMax == null) o.fixedRpmMax = o.fixedRpm ?? 100;
+  if (Array.isArray(o.bands)) {
+    o.bands = o.bands.map((b) => {
+      if (!b || typeof b !== "object") return b;
+      const x = { ...b };
+      if (
+        (x.rpm_min == null || x.rpm_max == null) &&
+        x.rpm != null &&
+        Number.isFinite(Number(x.rpm))
+      ) {
+        const r = Number(x.rpm);
+        x.rpm_min = r;
+        x.rpm_max = r;
+      }
+      return x;
+    });
+  }
   return o;
 }
 
@@ -507,8 +556,11 @@ function applyThrowConfigToDom(cfg) {
     if (c.throwMode === "manual") throwModeManualEl.checked = true;
     else throwModeAutoEl.checked = true;
   }
-  if (throwFixedRpmEl && c.fixedRpm != null) {
-    throwFixedRpmEl.value = String(c.fixedRpm);
+  if (throwFixedRpmMinEl && c.fixedRpmMin != null) {
+    throwFixedRpmMinEl.value = String(c.fixedRpmMin);
+  }
+  if (throwFixedRpmMaxEl && c.fixedRpmMax != null) {
+    throwFixedRpmMaxEl.value = String(c.fixedRpmMax);
   }
   if (throwBandCountEl && c.bandCount != null) {
     throwBandCountEl.value = String(
@@ -520,12 +572,14 @@ function applyThrowConfigToDom(cfg) {
     const b = bands[i];
     const minEl = document.getElementById(`throw-band-${i}-min`);
     const maxEl = document.getElementById(`throw-band-${i}-max`);
-    const rpmEl = document.getElementById(`throw-band-${i}-rpm`);
-    if (!minEl || !maxEl || !rpmEl) continue;
+    const rminEl = document.getElementById(`throw-band-${i}-rpm-min`);
+    const rmaxEl = document.getElementById(`throw-band-${i}-rpm-max`);
+    if (!minEl || !maxEl || !rminEl || !rmaxEl) continue;
     if (b && typeof b === "object") {
       if (b.min_m != null) minEl.value = String(b.min_m);
       if (b.max_m != null) maxEl.value = String(b.max_m);
-      if (b.rpm != null) rpmEl.value = String(b.rpm);
+      if (b.rpm_min != null) rminEl.value = String(b.rpm_min);
+      if (b.rpm_max != null) rmaxEl.value = String(b.rpm_max);
     }
   }
   const tun = {
@@ -552,20 +606,23 @@ function readThrowConfigFromDom() {
     6,
     Math.max(1, parseInt(throwBandCountEl?.value ?? "3", 10) || 3),
   );
-  /** @type {Array<{ min_m: number, max_m: number, rpm: number }>} */
+  /** @type {Array<{ min_m: number, max_m: number, rpm_min: number, rpm_max: number }>} */
   const bands = [];
   for (let i = 0; i < 6; i++) {
     const minEl = document.getElementById(`throw-band-${i}-min`);
     const maxEl = document.getElementById(`throw-band-${i}-max`);
-    const rpmEl = document.getElementById(`throw-band-${i}-rpm`);
-    if (!minEl || !maxEl || !rpmEl) continue;
+    const rminEl = document.getElementById(`throw-band-${i}-rpm-min`);
+    const rmaxEl = document.getElementById(`throw-band-${i}-rpm-max`);
+    if (!minEl || !maxEl || !rminEl || !rmaxEl) continue;
     const min_m = parseFloat(minEl.value);
     const max_m = parseFloat(maxEl.value);
-    const rpm = parseInt(rpmEl.value, 10);
+    const rpm_min = parseInt(rminEl.value, 10);
+    const rpm_max = parseInt(rmaxEl.value, 10);
     bands.push({
       min_m: Number.isFinite(min_m) ? min_m : 0,
       max_m: Number.isFinite(max_m) ? max_m : 0,
-      rpm: Number.isFinite(rpm) ? rpm : 0,
+      rpm_min: Number.isFinite(rpm_min) ? rpm_min : 0,
+      rpm_max: Number.isFinite(rpm_max) ? rpm_max : 0,
     });
   }
   /** @type {Record<string, number>} */
@@ -576,15 +633,56 @@ function readThrowConfigFromDom() {
     const v = parseFloat(el.value);
     if (Number.isFinite(v)) tuning[key] = v;
   }
+  let fixedRpmMin = Math.max(
+    0,
+    Math.min(500, parseInt(throwFixedRpmMinEl?.value ?? "100", 10) || 0),
+  );
+  let fixedRpmMax = Math.max(
+    0,
+    Math.min(500, parseInt(throwFixedRpmMaxEl?.value ?? "100", 10) || 0),
+  );
+  if (fixedRpmMin > fixedRpmMax) {
+    const t = fixedRpmMin;
+    fixedRpmMin = fixedRpmMax;
+    fixedRpmMax = t;
+  }
   return {
     throwMode,
-    fixedRpm: parseInt(throwFixedRpmEl?.value ?? "100", 10) || 0,
+    fixedRpmMin,
+    fixedRpmMax,
     bandCount,
     bands,
     tuning,
     vizDistMin: parseFloat(throwVizMinEl?.value ?? "0.5") || 0.5,
     vizDistMax: parseFloat(throwVizMaxEl?.value ?? "12") || 12,
   };
+}
+
+/**
+ * @param {number} rm
+ * @param {number} tolRatio
+ */
+function isMeasuredRpmInTargetWindow(rm, tolRatio) {
+  const tmin = telemetry.target_rpm_min;
+  const tmax = telemetry.target_rpm_max;
+  const tr = telemetry.target_rpm;
+  if (rm == null || !Number.isFinite(rm)) return false;
+  if (
+    tmin != null &&
+    tmax != null &&
+    Number.isFinite(tmin) &&
+    Number.isFinite(tmax)
+  ) {
+    if (tmin === tmax) {
+      const tol = Math.max(2, Math.abs(tmin) * tolRatio);
+      return Math.abs(rm - tmin) <= tol;
+    }
+    return rm >= tmin && rm <= tmax;
+  }
+  if (tr != null && tr > 0) {
+    return Math.abs(rm - tr) / tr <= tolRatio;
+  }
+  return false;
 }
 
 function saveThrowConfigToStorage() {
@@ -624,7 +722,8 @@ function initThrowTuningUi() {
   const saved = loadThrowConfigFromStorage();
   applyThrowConfigToDom({
     throwMode: "auto",
-    fixedRpm: 100,
+    fixedRpmMin: 100,
+    fixedRpmMax: 100,
     bandCount: 3,
     bands: DEFAULT_THROW_BANDS,
     tuning: defaultThrowTuning(),
@@ -634,7 +733,7 @@ function initThrowTuningUi() {
   });
 
   const onCh = () => onThrowSettingsChanged();
-  [throwBandCountEl, throwVizMinEl, throwVizMaxEl, throwFixedRpmEl].forEach(
+  [throwBandCountEl, throwVizMinEl, throwVizMaxEl, throwFixedRpmMinEl, throwFixedRpmMaxEl].forEach(
     (el) => el?.addEventListener("input", onCh),
   );
   [throwModeAutoEl, throwModeManualEl].forEach((el) =>
@@ -646,7 +745,7 @@ function initThrowTuningUi() {
   );
 
   for (let i = 0; i < 6; i++) {
-    for (const suf of ["min", "max", "rpm"]) {
+    for (const suf of ["min", "max", "rpm-min", "rpm-max"]) {
       document.getElementById(`throw-band-${i}-${suf}`)?.addEventListener("input", onCh);
     }
   }
@@ -688,6 +787,41 @@ function initThrowTuningUi() {
   throwAutoFireIntervalEl?.addEventListener("input", () => {
     lastAutoFeedAtMs = 0;
   });
+
+  if (motorTestPctEl && motorTestSliderEl) {
+    motorTestPctEl.textContent = `${motorTestSliderEl.value}%`;
+  }
+  motorTestEnableEl?.addEventListener("change", () => {
+    syncMotorTestUi();
+    pushBridgeControl(lastPlayersSnapshot);
+  });
+  motorTestJumpLinkEl?.addEventListener("click", (e) => {
+    e.preventDefault();
+    motorTestPanelEl?.scrollIntoView({ behavior: "smooth", block: "start" });
+    motorTestPanelEl?.focus({ preventScroll: true });
+  });
+
+  motorTestSliderEl?.addEventListener("input", () => {
+    if (motorTestPctEl) motorTestPctEl.textContent = `${motorTestSliderEl.value}%`;
+    if (motorTestEnableEl?.checked && bridge.isConnected()) {
+      const cfg = readThrowConfigFromDom();
+      bridge.setControl({
+        target_m: null,
+        armed: false,
+        selected_player_id: null,
+        rpm_mode: "auto",
+        target_rpm_manual: null,
+        bands: null,
+        tuning:
+          Object.keys(cfg.tuning).length > 0 ? cfg.tuning : undefined,
+        auto_feed_dwell: false,
+        test_mode: true,
+        test_pwm: parseFloat(motorTestSliderEl.value) || 0,
+      });
+      bridge.flush();
+    }
+  });
+  syncMotorTestUi();
 }
 
 function setMachineVisualState(stateRaw) {
@@ -699,6 +833,7 @@ function setMachineVisualState(stateRaw) {
     cooldown: "machine-cooldown",
     fault: "machine-fault",
     holding: "machine-spinup",
+    test: "machine-test",
   };
   const cls = map[st] || "machine-idle";
   MACHINE_CLASSES.forEach((c) => {
@@ -1477,8 +1612,23 @@ function updateMachinePanel() {
     telemetry.rpm != null && Number.isFinite(telemetry.rpm)
       ? telemetry.rpm.toFixed(0)
       : "—";
-  rpmTargetEl.textContent =
-    telemetry.target_rpm != null ? String(telemetry.target_rpm) : "—";
+  {
+    const tr = telemetry.target_rpm;
+    const tlo = telemetry.target_rpm_min;
+    const thi = telemetry.target_rpm_max;
+    if (
+      tlo != null &&
+      thi != null &&
+      Number.isFinite(tlo) &&
+      Number.isFinite(thi)
+    ) {
+      rpmTargetEl.textContent = tlo === thi ? String(tlo) : `${tlo}–${thi}`;
+    } else if (tr != null) {
+      rpmTargetEl.textContent = String(tr);
+    } else {
+      rpmTargetEl.textContent = "—";
+    }
+  }
 
   cmdDistEl.textContent =
     telemetry.dist_m != null && Number.isFinite(telemetry.dist_m)
@@ -1486,15 +1636,27 @@ function updateMachinePanel() {
       : "—";
 
   const tr = telemetry.target_rpm;
+  const tlo = telemetry.target_rpm_min;
+  const thi = telemetry.target_rpm_max;
   const rm = telemetry.rpm;
   let pct = 0;
   let gaugeClass = "";
-  if (tr != null && tr > 0 && rm != null && Number.isFinite(rm)) {
-    pct = Math.min(100, (Math.abs(rm) / tr) * 100);
-    const errRatio = Math.abs(rm - tr) / tr;
-    if (errRatio <= 0.08) gaugeClass = "";
-    else if (errRatio <= 0.2) gaugeClass = "gauge-warn";
-    else gaugeClass = "gauge-bad";
+  const mid =
+    tlo != null &&
+    thi != null &&
+    Number.isFinite(tlo) &&
+    Number.isFinite(thi)
+      ? (tlo + thi) / 2
+      : tr;
+  if (mid != null && mid > 0 && rm != null && Number.isFinite(rm)) {
+    pct = Math.min(100, (Math.abs(rm) / mid) * 100);
+    if (isMeasuredRpmInTargetWindow(rm, 0.08)) {
+      gaugeClass = "";
+    } else {
+      const errRatio = Math.abs(rm - mid) / mid;
+      if (errRatio <= 0.2) gaugeClass = "gauge-warn";
+      else gaugeClass = "gauge-bad";
+    }
   }
   gaugeFillEl.style.width = `${pct.toFixed(0)}%`;
   gaugeFillEl.className = "gauge-fill" + (gaugeClass ? ` ${gaugeClass}` : "");
@@ -1518,9 +1680,21 @@ function updateMachinePanel() {
   }
 
   rpmBandHintEl.textContent =
-    tr != null
-      ? `MCU target speed: ${tr} RPM`
-      : "Target RPM shows here when the MCU reports it over serial.";
+    tlo != null && thi != null && Number.isFinite(tlo) && Number.isFinite(thi)
+      ? tlo === thi
+        ? `MCU target window: ${tlo} RPM`
+        : `MCU target window: ${tlo}–${thi} RPM`
+      : tr != null
+        ? `MCU target speed: ${tr} RPM`
+        : "Target RPM shows here when the MCU reports it over serial.";
+
+  if (motorTestRpmEl) {
+    motorTestRpmEl.textContent =
+      telemetry.rpm != null && Number.isFinite(telemetry.rpm)
+        ? telemetry.rpm.toFixed(0)
+        : "—";
+  }
+  syncMotorTestUi();
 
   updateThrowLiveReadout();
 }
@@ -1537,7 +1711,7 @@ function maybeAutoFeedOnce() {
   const rm = telemetry.rpm;
   const tol = cfg.tuning?.rpm_tol_ratio ?? 0.08;
   if (tr == null || tr <= 0 || rm == null || !Number.isFinite(rm)) return;
-  if (Math.abs(rm - tr) / tr > tol) return;
+  if (!isMeasuredRpmInTargetWindow(rm, tol)) return;
   const now = performance.now();
   if (now - lastAutoFeedAtMs < intervalMs) return;
   lastAutoFeedAtMs = now;
@@ -1550,6 +1724,8 @@ bridge.setOnTelemetry((t) => {
   if (t.state != null) telemetry.state = String(t.state).toUpperCase();
   if (t.rpm !== undefined) telemetry.rpm = t.rpm;
   if (t.target_rpm !== undefined) telemetry.target_rpm = t.target_rpm;
+  if (t.target_rpm_min !== undefined) telemetry.target_rpm_min = t.target_rpm_min;
+  if (t.target_rpm_max !== undefined) telemetry.target_rpm_max = t.target_rpm_max;
   if (t.dist_m !== undefined) telemetry.dist_m = t.dist_m;
   if (t.err !== undefined) telemetry.err = t.err;
   if (
@@ -1596,16 +1772,8 @@ bridge.setOnTelemetry((t) => {
     }
   }
 
-  const tr = telemetry.target_rpm;
   const rm = telemetry.rpm;
-  if (
-    tr != null &&
-    rm != null &&
-    Number.isFinite(tr) &&
-    Number.isFinite(rm) &&
-    tr > 0 &&
-    Math.abs(rm - tr) / tr <= 0.08
-  ) {
+  if (rm != null && Number.isFinite(rm) && isMeasuredRpmInTargetWindow(rm, 0.08)) {
     dwellClientMs = Math.min(DWELL_TARGET_MS + 80, dwellClientMs + 50);
   } else {
     dwellClientMs = Math.max(0, dwellClientMs - 80);
@@ -1637,7 +1805,7 @@ bridge.setOnConnectionEvent((ev) => {
   } else if (ev.type === "open") {
     setBridgeOrbVisual("online");
     setBridgeStatusText("Bridge online");
-    armCheckbox.disabled = false;
+    syncMotorTestUi();
     btnStop.disabled = false;
     setAlertBanner("");
     appendActivityLine("WebSocket connection open — telemetry streaming.", "info");
@@ -1648,6 +1816,7 @@ bridge.setOnConnectionEvent((ev) => {
     armCheckbox.disabled = true;
     armCheckbox.checked = false;
     btnStop.disabled = true;
+    syncMotorTestUi();
     lastBridgeLogLen = 0;
     appendActivityLine("WebSocket connection closed.", "warn");
     showHeaderChip("Bridge disconnected — controls disabled.", {
@@ -1728,21 +1897,35 @@ armCheckbox.addEventListener("change", () => {
   if (
     cfg.throwMode === "manual" &&
     armCheckbox.checked &&
-    (parseInt(String(throwFixedRpmEl?.value ?? "0"), 10) || 0) <= 0
+    cfg.fixedRpmMax <= 0
   ) {
-    setAlertBanner("Set a fixed RPM greater than zero before arming.");
+    setAlertBanner("Set manual RPM max greater than zero before arming.");
     armCheckbox.checked = false;
     return;
   }
-  bridge.setControl({ armed: armCheckbox.checked });
+  bridge.setControl({
+    armed: armCheckbox.checked,
+    test_mode: false,
+    test_pwm: 0,
+  });
   announceMachineState(
     armCheckbox.checked ? "Machine armed" : "Machine disarmed",
   );
 });
 
 btnStop.addEventListener("click", () => {
+  if (motorTestEnableEl) motorTestEnableEl.checked = false;
+  if (motorTestSliderEl) motorTestSliderEl.value = "0";
+  if (motorTestPctEl) motorTestPctEl.textContent = "0%";
+  syncMotorTestUi();
   armCheckbox.checked = false;
-  bridge.setControl({ armed: false, target_m: null, selected_player_id: null });
+  bridge.setControl({
+    armed: false,
+    target_m: null,
+    selected_player_id: null,
+    test_mode: false,
+    test_pwm: 0,
+  });
   bridge.sendStop();
   announceMachineState("Stop sent, machine disarmed");
   showHeaderChip("Emergency stop sent — machine disarmed.", {
@@ -1777,14 +1960,49 @@ function drawDepthHeatmap(data, ow, oh, min, max) {
   depthContext.putImageData(new ImageData(imageData, ow, oh), 0, 0);
 }
 
+function syncMotorTestUi() {
+  const on = motorTestEnableEl?.checked ?? false;
+  const connected = bridge.isConnected();
+  document.body.classList.toggle("app-motor-test", on);
+  // Slider: draggable whenever bridge is online (checkbox gates MCU test mode + dimming).
+  if (motorTestSliderEl) motorTestSliderEl.disabled = !connected;
+  if (armCheckbox) {
+    armCheckbox.disabled = !connected || on;
+    if (on) armCheckbox.checked = false;
+  }
+}
+
 function pushBridgeControl(players) {
   if (!bridge.isConnected()) return;
 
   const cfg = readThrowConfigFromDom();
+  const motorTestOn = motorTestEnableEl?.checked ?? false;
+
+  if (motorTestOn) {
+    bridge.setControl({
+      target_m: null,
+      armed: false,
+      selected_player_id: null,
+      rpm_mode: "auto",
+      target_rpm_manual: null,
+      bands: null,
+      tuning: Object.keys(cfg.tuning).length > 0 ? cfg.tuning : undefined,
+      auto_feed_dwell: false,
+      test_mode: true,
+      test_pwm: parseFloat(motorTestSliderEl?.value ?? "0") || 0,
+    });
+    bridge.flush();
+    if (noPlayerDisarmTimer) {
+      clearTimeout(noPlayerDisarmTimer);
+      noPlayerDisarmTimer = 0;
+    }
+    return;
+  }
+
   const isAuto = cfg.throwMode === "auto";
   const wantArm =
     armCheckbox.checked &&
-    (isAuto ? calibration != null : cfg.fixedRpm > 0);
+    (isAuto ? calibration != null : cfg.fixedRpmMax > 0);
   let targetM = null;
   let selectedId = null;
 
@@ -1802,7 +2020,7 @@ function pushBridgeControl(players) {
 
   const effectiveArm =
     wantArm &&
-    (isAuto ? targetM != null : cfg.fixedRpm > 0);
+    (isAuto ? targetM != null : cfg.fixedRpmMax > 0);
 
   if (
     !effectiveArm &&
@@ -1818,9 +2036,9 @@ function pushBridgeControl(players) {
     !effectiveArm &&
     armCheckbox.checked &&
     !isAuto &&
-    cfg.fixedRpm <= 0
+    cfg.fixedRpmMax <= 0
   ) {
-    setAlertBanner("Set a fixed RPM greater than zero.");
+    setAlertBanner("Set manual RPM max greater than zero.");
   } else if (effectiveArm) {
     setAlertBanner("");
   }
@@ -1829,17 +2047,23 @@ function pushBridgeControl(players) {
   for (let i = 0; i < cfg.bandCount; i++) {
     const minEl = document.getElementById(`throw-band-${i}-min`);
     const maxEl = document.getElementById(`throw-band-${i}-max`);
-    const rpmEl = document.getElementById(`throw-band-${i}-rpm`);
-    if (!minEl || !maxEl || !rpmEl) continue;
+    const rminEl = document.getElementById(`throw-band-${i}-rpm-min`);
+    const rmaxEl = document.getElementById(`throw-band-${i}-rpm-max`);
+    if (!minEl || !maxEl || !rminEl || !rmaxEl) continue;
     const min_m = parseFloat(minEl.value);
     const max_m = parseFloat(maxEl.value);
-    const rpm = parseInt(rpmEl.value, 10);
+    const rpm_min = parseInt(rminEl.value, 10);
+    const rpm_max = parseInt(rmaxEl.value, 10);
     if (!Number.isFinite(min_m) || !Number.isFinite(max_m)) continue;
     if (min_m >= max_m) continue;
+    const r0 = Math.max(0, Math.min(500, Number.isFinite(rpm_min) ? rpm_min : 0));
+    const r1 = Math.max(0, Math.min(500, Number.isFinite(rpm_max) ? rpm_max : 0));
+    if (r0 > r1) continue;
     bandsPayload.push({
       min_m,
       max_m,
-      rpm: Math.max(0, Math.min(500, Number.isFinite(rpm) ? rpm : 0)),
+      rpm_min: r0,
+      rpm_max: r1,
     });
   }
 
@@ -1848,11 +2072,15 @@ function pushBridgeControl(players) {
     armed: effectiveArm,
     selected_player_id: selectedId,
     rpm_mode: isAuto ? "auto" : "manual",
-    target_rpm_manual: isAuto ? null : cfg.fixedRpm,
+    target_rpm_manual: isAuto
+      ? null
+      : [cfg.fixedRpmMin, cfg.fixedRpmMax],
     bands:
       isAuto && bandsPayload.length > 0 ? bandsPayload : null,
     tuning: Object.keys(cfg.tuning).length > 0 ? cfg.tuning : undefined,
     auto_feed_dwell: isAuto,
+    test_mode: false,
+    test_pwm: 0,
   });
 
   const disarmWhenNoPlayers = isAuto;
@@ -1860,7 +2088,13 @@ function pushBridgeControl(players) {
     if (!noPlayerDisarmTimer) {
       noPlayerDisarmTimer = window.setTimeout(() => {
         armCheckbox.checked = false;
-        bridge.setControl({ armed: false, target_m: null, selected_player_id: null });
+        bridge.setControl({
+          armed: false,
+          target_m: null,
+          selected_player_id: null,
+          test_mode: false,
+          test_pwm: 0,
+        });
         showHeaderChip("Disarmed: no players in frame.", {
           variant: "info",
           ttl: 7000,

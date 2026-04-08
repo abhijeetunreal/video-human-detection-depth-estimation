@@ -159,6 +159,43 @@
             >
           </nav>
           <div
+            class="control-card motor-test-card"
+            id="motor-test-panel"
+            tabindex="-1"
+          >
+            <h3 class="control-card-title">Motor test</h3>
+            <p class="calibration-hint motor-test-help">
+              Open-loop bench PWM (MCU ignores arm / throw / vision). Check
+              <strong>Send test mode</strong> to apply; adjust the slider anytime the bridge is
+              online.
+            </p>
+            <label class="motor-test-enable-label">
+              <input type="checkbox" id="motor-test-enable" />
+              Send test mode to MCU
+            </label>
+            <label class="field-label" for="motor-test-slider"
+              >Accelerator (0–100% of max PWM)</label
+            >
+            <input
+              id="motor-test-slider"
+              type="range"
+              min="0"
+              max="100"
+              value="0"
+              step="1"
+              disabled
+              class="motor-test-slider"
+            />
+            <div class="motor-test-row">
+              <span id="motor-test-pct">0%</span>
+              <span class="muted">of max PWM</span>
+            </div>
+            <div class="motor-test-rpm-row">
+              <span class="hud-label">RPM (IR)</span>
+              <span class="hud-val" id="motor-test-rpm">—</span>
+            </div>
+          </div>
+          <div
             id="kinetic-panel"
             class="kinetic-panel machine-idle"
           >
@@ -569,6 +606,11 @@
                 Sent to the MCU over serial via the bridge. Settings are stored in
                 this browser unless you clear site data.
               </p>
+              <p class="calibration-hint motor-test-find-hint">
+                <strong>Motor test</strong> (bench PWM, IR RPM) is in the
+                <strong>left Machine column</strong> under the Machine tab —
+                <a href="#motor-test-panel" id="motor-test-jump-link">jump to motor test</a>.
+              </p>
 
               <fieldset class="throw-fieldset" id="throw-mode-fieldset">
                 <legend class="throw-legend">Operating mode</legend>
@@ -604,15 +646,25 @@
               </fieldset>
 
               <fieldset class="throw-fieldset" id="throw-manual-fieldset" disabled>
-                <legend class="throw-legend">Manual — fixed RPM &amp; feed</legend>
+                <legend class="throw-legend">Manual — RPM range &amp; feed</legend>
                 <p class="throw-help">
-                  Arm the machine for a constant wheel speed. The feeder does not run on dwell;
+                  Arm the machine for a target wheel speed window. The feeder does not run on dwell;
                   use <strong>Manual fire</strong> or enable <strong>Auto-fire</strong> (fires when
-                  speed matches target, on an interval).
+                  speed is in range, on an interval). Set min and max equal for a single setpoint.
                 </p>
-                <label class="field-label" for="throw-fixed-rpm">Fixed RPM</label>
+                <label class="field-label" for="throw-fixed-rpm-min">RPM min</label>
                 <input
-                  id="throw-fixed-rpm"
+                  id="throw-fixed-rpm-min"
+                  type="number"
+                  class="field-input field-input-wide"
+                  min="0"
+                  max="500"
+                  step="1"
+                  value="100"
+                />
+                <label class="field-label" for="throw-fixed-rpm-max">RPM max</label>
+                <input
+                  id="throw-fixed-rpm-max"
                   type="number"
                   class="field-input field-input-wide"
                   min="0"
@@ -661,7 +713,8 @@
                       <th>#</th>
                       <th>Min (m)</th>
                       <th>Max (m)</th>
-                      <th>RPM</th>
+                      <th>RPM min</th>
+                      <th>RPM max</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -687,11 +740,20 @@
                       </td>
                       <td>
                         <input
-                          id="throw-band-0-rpm"
+                          id="throw-band-0-rpm-min"
                           type="number"
                           step="1"
                           class="band-input"
-                          value="50"
+                          value="45"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          id="throw-band-0-rpm-max"
+                          type="number"
+                          step="1"
+                          class="band-input"
+                          value="55"
                         />
                       </td>
                     </tr>
@@ -717,11 +779,20 @@
                       </td>
                       <td>
                         <input
-                          id="throw-band-1-rpm"
+                          id="throw-band-1-rpm-min"
                           type="number"
                           step="1"
                           class="band-input"
-                          value="100"
+                          value="90"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          id="throw-band-1-rpm-max"
+                          type="number"
+                          step="1"
+                          class="band-input"
+                          value="110"
                         />
                       </td>
                     </tr>
@@ -747,11 +818,20 @@
                       </td>
                       <td>
                         <input
-                          id="throw-band-2-rpm"
+                          id="throw-band-2-rpm-min"
                           type="number"
                           step="1"
                           class="band-input"
-                          value="150"
+                          value="140"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          id="throw-band-2-rpm-max"
+                          type="number"
+                          step="1"
+                          class="band-input"
+                          value="160"
                         />
                       </td>
                     </tr>
@@ -764,7 +844,10 @@
                         <input id="throw-band-3-max" type="number" step="0.01" class="band-input" />
                       </td>
                       <td>
-                        <input id="throw-band-3-rpm" type="number" step="1" class="band-input" />
+                        <input id="throw-band-3-rpm-min" type="number" step="1" class="band-input" />
+                      </td>
+                      <td>
+                        <input id="throw-band-3-rpm-max" type="number" step="1" class="band-input" />
                       </td>
                     </tr>
                     <tr id="throw-band-row-4" class="band-row-extra">
@@ -776,7 +859,10 @@
                         <input id="throw-band-4-max" type="number" step="0.01" class="band-input" />
                       </td>
                       <td>
-                        <input id="throw-band-4-rpm" type="number" step="1" class="band-input" />
+                        <input id="throw-band-4-rpm-min" type="number" step="1" class="band-input" />
+                      </td>
+                      <td>
+                        <input id="throw-band-4-rpm-max" type="number" step="1" class="band-input" />
                       </td>
                     </tr>
                     <tr id="throw-band-row-5" class="band-row-extra">
@@ -788,7 +874,10 @@
                         <input id="throw-band-5-max" type="number" step="0.01" class="band-input" />
                       </td>
                       <td>
-                        <input id="throw-band-5-rpm" type="number" step="1" class="band-input" />
+                        <input id="throw-band-5-rpm-min" type="number" step="1" class="band-input" />
+                      </td>
+                      <td>
+                        <input id="throw-band-5-rpm-max" type="number" step="1" class="band-input" />
                       </td>
                     </tr>
                   </tbody>

@@ -9,6 +9,8 @@ const DEFAULT_INTERVAL_MS = 100;
  * @property {string} [state]
  * @property {number | null} [rpm]
  * @property {number | null} [target_rpm]
+ * @property {number | null} [target_rpm_min]
+ * @property {number | null} [target_rpm_max]
  * @property {number | null} [dist_m]
  * @property {string | null} [err]
  * @property {boolean} [serial_open]
@@ -33,13 +35,31 @@ export function createMachineBridge() {
    *   armed: boolean,
    *   selected_player_id: number | null,
    *   rpm_mode: string,
-   *   target_rpm_manual: number | null,
-   *   bands: Array<{ min_m: number, max_m: number, rpm: number }> | undefined,
+   *   target_rpm_manual: number | [number, number] | { rpm_min: number, rpm_max: number } | null,
+   *   bands: Array<{ min_m: number, max_m: number, rpm_min: number, rpm_max: number }> | undefined,
    *   tuning: Record<string, number> | undefined,
    *   auto_feed_dwell: boolean | undefined,
+   *   test_mode: boolean | undefined,
+   *   test_pwm: number | undefined,
    * } | null}
    */
   let pending = null;
+
+  /** Fresh merged state after reconnect — avoids stale test_mode / armed from old session. */
+  function defaultPending() {
+    return {
+      target_m: null,
+      armed: false,
+      selected_player_id: null,
+      rpm_mode: "auto",
+      target_rpm_manual: null,
+      bands: undefined,
+      tuning: undefined,
+      auto_feed_dwell: true,
+      test_mode: false,
+      test_pwm: 0,
+    };
+  }
 
   function emitConn(type, message) {
     onConnectionEvent?.({ type, message });
@@ -65,13 +85,16 @@ export function createMachineBridge() {
    *   armed: boolean,
    *   selected_player_id: number | null,
    *   rpm_mode: string,
-   *   target_rpm_manual: number | null,
-   *   bands: Array<{ min_m: number, max_m: number, rpm: number }>,
+   *   target_rpm_manual: number | [number, number] | { rpm_min: number, rpm_max: number } | null,
+   *   bands: Array<{ min_m: number, max_m: number, rpm_min: number, rpm_max: number }>,
    *   tuning: Record<string, number>,
    *   auto_feed_dwell: boolean,
+   *   test_mode: boolean,
+   *   test_pwm: number,
    * }>} patch
    */
   function setControl(patch) {
+    const prevTestMode = pending?.test_mode ?? false;
     pending = {
       target_m:
         patch.target_m !== undefined ? patch.target_m : pending?.target_m ?? null,
@@ -94,7 +117,16 @@ export function createMachineBridge() {
         patch.auto_feed_dwell !== undefined
           ? patch.auto_feed_dwell
           : pending?.auto_feed_dwell ?? true,
+      test_mode:
+        patch.test_mode !== undefined ? patch.test_mode : pending?.test_mode ?? false,
+      test_pwm:
+        patch.test_pwm !== undefined ? patch.test_pwm : pending?.test_pwm ?? 0,
     };
+    const nextTestMode = pending.test_mode;
+    /* Re-enabling test with same slider value reproduces the same JSON as before → flush() would skip send and bridge never sees TEST_MODE 1 again. */
+    if (prevTestMode !== nextTestMode) {
+      lastSent = "";
+    }
     scheduleSend();
   }
 
@@ -110,6 +142,7 @@ export function createMachineBridge() {
     }
     ws.addEventListener("open", () => {
       lastSent = "";
+      pending = defaultPending();
       emitConn("open");
       flush();
     });
