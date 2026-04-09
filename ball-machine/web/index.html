@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Ball machine — control</title>
+    <title>FLDX — Command operation</title>
     <link rel="stylesheet" href="style.css" />
   </head>
 
@@ -11,20 +11,25 @@
     <div id="app-root" class="app-root">
       <header class="dash-header" role="banner">
         <div class="dash-header-left">
-          <div class="brand-mark" aria-hidden="true"></div>
-          <div>
-            <h1 class="dash-title">Ball machine</h1>
-            <p class="dash-sub">
-              <span class="sr-only">Vision stack: </span>
-              <a
-                href="https://github.com/huggingface/transformers.js"
-                target="_blank"
-                rel="noreferrer"
-                >Transformers.js</a
-              >
-              <span aria-hidden="true"> · </span>
-              <span class="dash-sub-quiet">runs locally in the browser</span>
-            </p>
+          <a
+            class="dash-brand-logo-link"
+            href="https://github.com/abhijeetunreal/FLDX"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="FLDX — Precision in motion (opens GitHub)"
+          >
+            <img
+              class="dash-brand-logo"
+              src="https://raw.githubusercontent.com/abhijeetunreal/FLDX/main/Assets/fldx_thumbnail.png"
+              alt=""
+              width="140"
+              height="48"
+              decoding="async"
+              fetchpriority="high"
+            />
+          </a>
+          <div class="dash-brand-text">
+            <p class="dash-brand-eyebrow">Operations console</p>
           </div>
         </div>
         <div class="dash-header-center" aria-live="polite">
@@ -160,82 +165,6 @@
           </nav>
           <div class="panel-machine-body">
           <div
-            class="control-card motor-test-card"
-            id="motor-test-panel"
-            tabindex="-1"
-          >
-            <h3 class="control-card-title">Motor test</h3>
-            <p class="calibration-hint motor-test-help">
-              Open-loop bench PWM (MCU ignores arm / throw / vision). Check
-              <strong>Send test mode</strong> to apply; adjust the slider anytime the bridge is
-              online.
-            </p>
-            <label class="motor-test-enable-label">
-              <input type="checkbox" id="motor-test-enable" />
-              Send test mode to MCU
-            </label>
-            <label class="field-label" for="motor-test-slider"
-              >Accelerator (0–100% of max PWM)</label
-            >
-            <input
-              id="motor-test-slider"
-              type="range"
-              min="0"
-              max="100"
-              value="0"
-              step="1"
-              disabled
-              class="motor-test-slider"
-            />
-            <div class="motor-test-row">
-              <span id="motor-test-pct">0%</span>
-              <span class="muted">of max PWM</span>
-            </div>
-            <div class="motor-test-rpm-row">
-              <span class="hud-label">RPM (IR)</span>
-              <span class="hud-val" id="motor-test-rpm">—</span>
-            </div>
-            <div class="servo-test-block" role="group" aria-label="Servo feeder test">
-              <h4 class="servo-test-title">Servo feeder test</h4>
-              <p class="calibration-hint motor-test-help">
-                Moves the feeder <strong>0° → 180° → 0°</strong> once (MCU command
-                <code>SERVO_TEST</code>). Works with motor test on or off; not during an active feed
-                cycle.
-              </p>
-              <button type="button" id="servo-test-feed-btn" class="btn-secondary btn-small" disabled>
-                Run servo sweep (0°–180°–0°)
-              </button>
-            </div>
-            <div class="pan-test-block" role="group" aria-label="Linear actuator test">
-              <h4 class="servo-test-title">Linear actuator (pan) test</h4>
-              <p class="calibration-hint motor-test-help">
-                Manual <code>PAN_TARGET</code> 0–100% (retracted → extended). Same pattern as wheel
-                test: connect the bridge, then enable here and drag the slider. Off while
-                <strong>Send test mode</strong> is on. Arm, manual fire, auto-feed, and servo test are
-                disabled while pan test is on.
-              </p>
-              <label class="motor-test-enable-label">
-                <input type="checkbox" id="pan-test-enable" />
-                Enable pan test
-              </label>
-              <label class="field-label" for="pan-test-slider">Position</label>
-              <input
-                id="pan-test-slider"
-                type="range"
-                min="0"
-                max="100"
-                value="50"
-                step="1"
-                disabled
-                class="motor-test-slider"
-              />
-              <div class="motor-test-row">
-                <span id="pan-test-pct">50%</span>
-                <span class="muted">extended</span>
-              </div>
-            </div>
-          </div>
-          <div
             id="kinetic-panel"
             class="kinetic-panel machine-idle"
           >
@@ -353,6 +282,87 @@
             </div>
 
             <div id="dwell-fill" class="sr-only" aria-hidden="true"></div>
+          </div>
+          <div
+            class="panel-machine-tests-scroll"
+            aria-label="Motor and actuator tests"
+          >
+          <div
+            class="control-card motor-test-card"
+            id="motor-test-panel"
+            tabindex="-1"
+          >
+            <h3 class="control-card-title">Motor test</h3>
+            <p class="calibration-hint motor-test-help">
+              Open-loop bench PWM (MCU ignores arm / throw / vision). Check
+              <strong>Send test mode</strong> to apply; adjust the slider anytime the bridge is
+              online.
+            </p>
+            <label class="motor-test-enable-label">
+              <input type="checkbox" id="motor-test-enable" />
+              Send test mode to MCU
+            </label>
+            <label class="field-label" for="motor-test-slider"
+              >Accelerator (0–100% of max PWM)</label
+            >
+            <input
+              id="motor-test-slider"
+              type="range"
+              min="0"
+              max="100"
+              value="0"
+              step="1"
+              disabled
+              class="motor-test-slider"
+            />
+            <div class="motor-test-row">
+              <span id="motor-test-pct">0%</span>
+              <span class="muted">of max PWM</span>
+            </div>
+            <div class="motor-test-rpm-row">
+              <span class="hud-label">RPM (IR)</span>
+              <span class="hud-val" id="motor-test-rpm">—</span>
+            </div>
+            <div class="servo-test-block" role="group" aria-label="Servo feeder test">
+              <h4 class="servo-test-title">Servo feeder test</h4>
+              <p class="calibration-hint motor-test-help">
+                Moves the feeder <strong>0° → 180° → 0°</strong> once (MCU command
+                <code>SERVO_TEST</code>). Works with motor test on or off; not during an active feed
+                cycle.
+              </p>
+              <button type="button" id="servo-test-feed-btn" class="btn-secondary btn-small" disabled>
+                Run servo sweep (0°–180°–0°)
+              </button>
+            </div>
+            <div class="pan-test-block" role="group" aria-label="Linear actuator test">
+              <h4 class="servo-test-title">Linear actuator (pan) test</h4>
+              <p class="calibration-hint motor-test-help">
+                Manual <code>PAN_TARGET</code> 0–100% (retracted → extended). Same pattern as wheel
+                test: connect the bridge, then enable here and drag the slider. Off while
+                <strong>Send test mode</strong> is on. Arm, manual fire, auto-feed, and servo test are
+                disabled while pan test is on.
+              </p>
+              <label class="motor-test-enable-label">
+                <input type="checkbox" id="pan-test-enable" />
+                Enable pan test
+              </label>
+              <label class="field-label" for="pan-test-slider">Position</label>
+              <input
+                id="pan-test-slider"
+                type="range"
+                min="0"
+                max="100"
+                value="50"
+                step="1"
+                disabled
+                class="motor-test-slider"
+              />
+              <div class="motor-test-row">
+                <span id="pan-test-pct">50%</span>
+                <span class="muted">extended</span>
+              </div>
+            </div>
+          </div>
           </div>
           </div>
           </aside>
@@ -523,7 +533,7 @@
                 </nav>
               </div>
               <p class="vscode-terminal-hint muted">
-                Bridge &amp; UI = WebSocket events and server-side bridge actions · MCU serial = Arduino lines (dev-server style log).
+                Bridge &amp; UI = WebSocket events and server-side bridge actions · MCU serial 
               </p>
             </div>
             </div>
@@ -649,7 +659,8 @@
               </p>
               <p class="calibration-hint motor-test-find-hint">
                 <strong>Motor test</strong> (bench PWM, IR RPM) is in the
-                <strong>left Machine column</strong> under the Machine tab —
+                <strong>left Machine column</strong>, below the machine schematic (scroll the column if
+                needed) —
                 <a href="#motor-test-panel" id="motor-test-jump-link">jump to motor test</a>.
               </p>
 
