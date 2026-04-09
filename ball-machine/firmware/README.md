@@ -10,8 +10,15 @@
 | BTS7960 R_EN | 7            |
 | BTS7960 L_EN | 8            |
 | Servo signal | 9           |
+| Pan BTS7960 RPWM | 6 (PWM) |
+| Pan BTS7960 LPWM | 11 (PWM) |
+| Pan BTS7960 R_EN | 12 |
+| Pan BTS7960 L_EN | 13 |
+| Pan retract limit (optional) | 4 — `INPUT_PULLUP`, **LOW** = fully retracted |
 
-Note: On Uno, **Servo** disables PWM on pins 9 and 10, so the motor PWM uses **3 and 5** instead.
+Note: On Uno, **Servo** disables PWM on pins 9 and 10, so the motor PWM uses **3 and 5** instead. The **second** BTS7960 (12 V linear actuator) uses **6 and 11** for PWM.
+
+**12 V actuator on a 24 V SMPS:** power the actuator from a **24 V→12 V buck converter** (adequate current for the motor) or a separate **12 V** supply. **Do not** connect a 12 V-rated actuator directly to 24 V. Common **GND** among Arduino, both drivers, and supplies.
 
 **SG90 feeder:** The sketch uses **Servo.write(0)** and **Servo.write(180)** (full 0°–180° with `attach(pin, 1000, 2000)`). Power the servo from a **separate 5 V supply** (common GND with Arduino and motor driver); **USB-powered** Arduinos often cannot deliver enough current and the servo will not move reliably.
 
@@ -26,6 +33,8 @@ Edit the `distBands[]` defaults in the sketch (each row: distance `[min_m,max_m)
 ## Serial
 
 115200 baud, line-based commands: `TARGET_M 2.5`, `ARM`, `DISARM`, `STOP`.
+
+**Head / linear actuator (second BTS7960):** `PAN_ENABLE 0|1`, `PAN_TARGET 0.000`…`1.000` (0 = retracted, 1 = extended; open-loop estimate on MCU — tune **`SET_PAN_STROKE_S`** to match your actuator speed at **`SET_PAN_PWM_MAX`**). **`PAN_HOME`** drives retract until pin **4** goes **LOW** (limit switch) or **12 s** timeout. Tunables: **`SET_PAN_PWM_MAX`** (10–255), **`SET_PAN_SLEW`** (1–255, PWM delta per 25 ms tick), **`SET_PAN_DB`** (0.005–0.5, position deadband between target and internal estimate), **`SET_PAN_TIMEOUT_MS`** (200–30000, max time in one direction before stopping), **`SET_PAN_STROKE_S`** (0.5–120, seconds for full 0→1 travel at max PWM). **`STOP`** and **`TEST_MODE 1`** disable pan output. Without a retract limit, **`PAN_HOME`** still runs retract for up to **12 s** — use only when mechanically safe.
 
 **Bench test (open-loop):** `TEST_MODE 1` then `TEST_PWM <0…PWM_MAX>` (see `SET_PWM_MAX`). `TEST_MODE 0` or `STOP` exits. While active, other motion commands are ignored. The sketch prints **`ACK TEST_MODE 1`** / **`ACK TEST_MODE 0`** on the serial line when test mode is accepted. **`SERVO_TEST`** runs a short **0° → 180° → 0°** sweep (about **3 × SERVO_TEST_HOLD_MS** in the sketch, default 400 ms per step) **without** a full feed cycle; works in **or** out of `TEST_MODE` (not in `FEEDING`/`COOLDOWN`). The dashboard **“Run servo sweep”** button sends this command.
 

@@ -49,7 +49,247 @@ function defaultThrowTuning() {
   };
 }
 
+function defaultHeadTracking() {
+  return {
+    enabled: false,
+    /** 0 = Player 1 (leftmost in sorted list) */
+    trackPlayerSlot: 0,
+    distMin: 5,
+    distMax: 80,
+    outOfRange: "hold_last",
+    invertX: false,
+    marginLeftPct: 5,
+    marginRightPct: 5,
+    posDeadband: 0.02,
+    emaAlpha: 0.25,
+    minSendMs: 100,
+    mcuPwmMax: 120,
+    mcuSlew: 8,
+    mcuPosDeadband: 0.04,
+    mcuTimeoutMs: 4000,
+    mcuStrokeS: 18,
+    homeOnConnect: false,
+  };
+}
+
+/**
+ * @param {unknown} raw
+ */
+function normalizeHeadTracking(raw) {
+  const d = defaultHeadTracking();
+  if (!raw || typeof raw !== "object") return d;
+  const h = /** @type {Record<string, unknown>} */ (raw);
+  const or = h.outOfRange;
+  const outOfRange =
+    or === "retract" || or === "center" ? or : "hold_last";
+  const out = {
+    enabled: Boolean(h.enabled),
+    trackPlayerSlot: (() => {
+      const a = h.trackPlayerSlot;
+      const b = h.headTargetPlayer;
+      if (typeof a === "number" && Number.isFinite(a))
+        return Math.min(7, Math.max(0, Math.round(a)));
+      if (typeof b === "number" && Number.isFinite(b))
+        return Math.min(7, Math.max(0, Math.round(b)));
+      return d.trackPlayerSlot;
+    })(),
+    distMin:
+      typeof h.distMin === "number" && Number.isFinite(h.distMin)
+        ? Math.max(0, h.distMin)
+        : d.distMin,
+    distMax:
+      typeof h.distMax === "number" && Number.isFinite(h.distMax)
+        ? Math.max(0.1, h.distMax)
+        : d.distMax,
+    outOfRange,
+    invertX: Boolean(h.invertX),
+    marginLeftPct:
+      typeof h.marginLeftPct === "number" && Number.isFinite(h.marginLeftPct)
+        ? Math.min(45, Math.max(0, h.marginLeftPct))
+        : d.marginLeftPct,
+    marginRightPct:
+      typeof h.marginRightPct === "number" && Number.isFinite(h.marginRightPct)
+        ? Math.min(45, Math.max(0, h.marginRightPct))
+        : d.marginRightPct,
+    posDeadband:
+      typeof h.posDeadband === "number" && Number.isFinite(h.posDeadband)
+        ? Math.min(0.5, Math.max(0, h.posDeadband))
+        : d.posDeadband,
+    emaAlpha:
+      typeof h.emaAlpha === "number" && Number.isFinite(h.emaAlpha)
+        ? Math.min(1, Math.max(0.01, h.emaAlpha))
+        : d.emaAlpha,
+    minSendMs:
+      typeof h.minSendMs === "number" && Number.isFinite(h.minSendMs)
+        ? Math.min(2000, Math.max(20, Math.round(h.minSendMs)))
+        : d.minSendMs,
+    mcuPwmMax:
+      typeof h.mcuPwmMax === "number" && Number.isFinite(h.mcuPwmMax)
+        ? Math.min(255, Math.max(10, Math.round(h.mcuPwmMax)))
+        : d.mcuPwmMax,
+    mcuSlew:
+      typeof h.mcuSlew === "number" && Number.isFinite(h.mcuSlew)
+        ? Math.min(255, Math.max(1, Math.round(h.mcuSlew)))
+        : d.mcuSlew,
+    mcuPosDeadband:
+      typeof h.mcuPosDeadband === "number" && Number.isFinite(h.mcuPosDeadband)
+        ? Math.min(0.5, Math.max(0.005, h.mcuPosDeadband))
+        : d.mcuPosDeadband,
+    mcuTimeoutMs:
+      typeof h.mcuTimeoutMs === "number" && Number.isFinite(h.mcuTimeoutMs)
+        ? Math.min(30000, Math.max(200, Math.round(h.mcuTimeoutMs)))
+        : d.mcuTimeoutMs,
+    mcuStrokeS:
+      typeof h.mcuStrokeS === "number" && Number.isFinite(h.mcuStrokeS)
+        ? Math.min(120, Math.max(0.5, h.mcuStrokeS))
+        : d.mcuStrokeS,
+    homeOnConnect: Boolean(h.homeOnConnect),
+  };
+  if (out.distMax < out.distMin) {
+    const s = out.distMin;
+    out.distMin = out.distMax;
+    out.distMax = s;
+  }
+  return out;
+}
+
+/**
+ * @param {string} id
+ * @param {number} num
+ * @param {number[]} allowed
+ */
+function setHeadSelectNearest(id, num, allowed) {
+  const el = document.getElementById(id);
+  if (!el || el.tagName !== "SELECT") return;
+  const s = String(num);
+  if ([...el.options].some((o) => o.value === s)) {
+    el.value = s;
+    return;
+  }
+  let best = allowed[0];
+  let bd = Math.abs(num - best);
+  for (const x of allowed) {
+    const d = Math.abs(num - x);
+    if (d < bd) {
+      bd = d;
+      best = x;
+    }
+  }
+  el.value = String(best);
+}
+
 let lastPlayersSnapshot = [];
+
+/** When set, next `updateHeadTargetPlayerSelect` applies this slot after options are built. */
+let pendingHeadTargetSlot = null;
+
+/** Roster identity (length + track order) for head-target select; avoids rebuilding while open. */
+let lastHeadTargetRosterSig = "";
+
+function headTargetDistGate() {
+  const dMin = parseFloat(document.getElementById("head-dist-min")?.value ?? "5");
+  const dMax = parseFloat(document.getElementById("head-dist-max")?.value ?? "80");
+  let distMin = Number.isFinite(dMin) ? dMin : 5;
+  let distMax = Number.isFinite(dMax) ? dMax : 80;
+  if (distMax < distMin) {
+    const t = distMin;
+    distMin = distMax;
+    distMax = t;
+  }
+  return { distMin, distMax };
+}
+
+function refreshHeadTargetOorClass() {
+  const sel = document.getElementById("head-target-player");
+  if (!sel || sel.disabled) return;
+  const opt = sel.options[sel.selectedIndex];
+  const oor = opt?.getAttribute("data-oor") === "1";
+  sel.classList.toggle("head-target-player--oor", !!oor);
+}
+
+/**
+ * @param {Array<{ trackId: number, meters: number | null }>} list
+ */
+function updateHeadTargetOptionLabels(list) {
+  const sel = document.getElementById("head-target-player");
+  if (!sel || sel.disabled || list.length === 0) return;
+  const { distMin, distMax } = headTargetDistGate();
+  for (let idx = 0; idx < list.length; idx++) {
+    const opt = sel.options[idx];
+    if (!opt) return;
+    const pl = list[idx];
+    const m = pl.meters;
+    const hasM = m != null && Number.isFinite(m);
+    const inRange = hasM && m >= distMin && m <= distMax;
+    const distPart = hasM ? `${m.toFixed(1)} m` : "no distance";
+    if (!hasM) {
+      opt.textContent = `P${idx + 1} · id ${pl.trackId} · ${distPart}`;
+      opt.removeAttribute("data-oor");
+    } else if (inRange) {
+      opt.textContent = `P${idx + 1} · id ${pl.trackId} · ${distPart}`;
+      opt.removeAttribute("data-oor");
+    } else {
+      opt.textContent = `P${idx + 1} · id ${pl.trackId} · ${distPart} · OUT OF RANGE`;
+      opt.setAttribute("data-oor", "1");
+    }
+  }
+  refreshHeadTargetOorClass();
+}
+
+/**
+ * @param {Array<{ box: DetBox, trackId: number, meters: number | null, score: number, det: number[] }>} players
+ */
+function updateHeadTargetPlayerSelect(players) {
+  const sel = document.getElementById("head-target-player");
+  if (!sel) return;
+
+  const list = players.slice(0, 8);
+  const distKey = `${document.getElementById("head-dist-min")?.value}|${document.getElementById("head-dist-max")?.value}`;
+  const sig = `${list.length}:${list.map((p) => p.trackId).join(",")}@${distKey}`;
+  const mustRebuild =
+    pendingHeadTargetSlot != null || sig !== lastHeadTargetRosterSig;
+
+  if (!mustRebuild) {
+    updateHeadTargetOptionLabels(list);
+    return;
+  }
+
+  lastHeadTargetRosterSig = sig;
+
+  let prev = parseInt(sel.value, 10);
+  if (!Number.isFinite(prev)) prev = 0;
+  if (pendingHeadTargetSlot != null) {
+    prev = pendingHeadTargetSlot;
+    pendingHeadTargetSlot = null;
+  }
+
+  sel.replaceChildren();
+
+  if (list.length === 0) {
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = "No players detected";
+    o.selected = true;
+    sel.appendChild(o);
+    sel.classList.remove("head-target-player--oor");
+    sel.disabled = true;
+    return;
+  }
+
+  sel.disabled = false;
+
+  for (let idx = 0; idx < list.length; idx++) {
+    const pl = list[idx];
+    const o = document.createElement("option");
+    o.value = String(idx);
+    sel.appendChild(o);
+  }
+
+  let pick = Math.min(Math.max(0, prev), list.length - 1);
+  sel.value = String(pick);
+
+  updateHeadTargetOptionLabels(list);
+}
 
 let throwSaveTimer = 0;
 
@@ -148,6 +388,9 @@ const motorTestSliderEl = document.getElementById("motor-test-slider");
 const motorTestPctEl = document.getElementById("motor-test-pct");
 const motorTestRpmEl = document.getElementById("motor-test-rpm");
 const servoTestFeedBtnEl = document.getElementById("servo-test-feed-btn");
+const panTestEnableEl = document.getElementById("pan-test-enable");
+const panTestSliderEl = document.getElementById("pan-test-slider");
+const panTestPctEl = document.getElementById("pan-test-pct");
 
 const throwTuningIds = [
   ["throw-dwell-ms", "dwell_ms"],
@@ -196,6 +439,11 @@ const EMA_ALPHA = 0.35;
 /** @type {number | null} selected slot index 0..n-1 */
 let selectedSlotIndex = null;
 let noPlayerDisarmTimer = 0;
+
+/** EMA-smoothed pan 0..1 while distance gate passes */
+let headPanEma = null;
+/** Last pan target sent to bridge (after UI deadband) */
+let lastSentPanTarget = null;
 
 /** @type {{ state: string, rpm: number | null, target_rpm: number | null, target_rpm_min: number | null, target_rpm_max: number | null, dist_m: number | null, err: string | null, lastRx: number }} */
 let telemetry = {
@@ -545,6 +793,8 @@ function migrateThrowConfig(cfg) {
       return x;
     });
   }
+  const baseH = defaultHeadTracking();
+  o.headTracking = normalizeHeadTracking(o.headTracking);
   return o;
 }
 
@@ -598,6 +848,52 @@ function applyThrowConfigToDom(cfg) {
   if (throwVizMaxEl && c.vizDistMax != null) {
     throwVizMaxEl.value = String(c.vizDistMax);
   }
+  const ht = normalizeHeadTracking(c.headTracking);
+  const he = document.getElementById("head-enable");
+  if (he) he.value = ht.enabled ? "1" : "0";
+  if ("headTracking" in cfg) {
+    pendingHeadTargetSlot = Math.min(7, Math.max(0, ht.trackPlayerSlot));
+    lastHeadTargetRosterSig = "";
+  }
+  setHeadSelectNearest("head-dist-min", ht.distMin, [1, 2, 3, 5, 6, 8, 10, 12, 15]);
+  setHeadSelectNearest(
+    "head-dist-max",
+    ht.distMax,
+    [15, 20, 30, 40, 60, 80, 100, 120, 200],
+  );
+  const hor = document.getElementById("head-out-of-range");
+  if (hor) {
+    hor.value =
+      ht.outOfRange === "retract" || ht.outOfRange === "center"
+        ? ht.outOfRange
+        : "hold_last";
+  }
+  const hix = document.getElementById("head-invert-x");
+  if (hix) hix.value = ht.invertX ? "1" : "0";
+  setHeadSelectNearest("head-margin-left", ht.marginLeftPct, [0, 5, 10, 15, 20]);
+  setHeadSelectNearest("head-margin-right", ht.marginRightPct, [0, 5, 10, 15, 20]);
+  setHeadSelectNearest("head-pos-deadband", ht.posDeadband, [
+    0.01, 0.02, 0.03, 0.05, 0.08, 0.12,
+  ]);
+  setHeadSelectNearest("head-ema-alpha", ht.emaAlpha, [
+    0.1, 0.15, 0.25, 0.35, 0.5, 0.65,
+  ]);
+  setHeadSelectNearest("head-min-send-ms", ht.minSendMs, [
+    50, 80, 100, 150, 200, 300, 500,
+  ]);
+  setHeadSelectNearest("head-mcu-pwm-max", ht.mcuPwmMax, [80, 100, 120, 160, 200]);
+  setHeadSelectNearest("head-mcu-slew", ht.mcuSlew, [4, 6, 8, 12, 16, 24]);
+  setHeadSelectNearest("head-mcu-pos-db", ht.mcuPosDeadband, [
+    0.02, 0.03, 0.04, 0.06, 0.08,
+  ]);
+  setHeadSelectNearest("head-mcu-timeout-ms", ht.mcuTimeoutMs, [
+    2000, 4000, 6000, 8000, 12000, 20000,
+  ]);
+  setHeadSelectNearest("head-mcu-stroke-s", ht.mcuStrokeS, [
+    10, 12, 15, 18, 22, 28, 35,
+  ]);
+  const hhc = document.getElementById("head-home-on-connect");
+  if (hhc) hhc.value = ht.homeOnConnect ? "1" : "0";
   updateBandRowVisibility();
   updateThrowPanelDisabledState();
 }
@@ -648,6 +944,57 @@ function readThrowConfigFromDom() {
     fixedRpmMin = fixedRpmMax;
     fixedRpmMax = t;
   }
+  const horEl = document.getElementById("head-out-of-range");
+  const orRaw = horEl?.value ?? "hold_last";
+  const outOfRange =
+    orRaw === "retract" || orRaw === "center" ? orRaw : "hold_last";
+
+  const hev = document.getElementById("head-enable")?.value ?? "0";
+  const htpRaw = document.getElementById("head-target-player")?.value ?? "";
+  let trackPlayerSlot = 0;
+  if (htpRaw !== "") {
+    const p = parseInt(htpRaw, 10);
+    if (Number.isFinite(p) && p >= 0) trackPlayerSlot = Math.min(7, p);
+  }
+  const headTracking = normalizeHeadTracking({
+    enabled: hev === "1",
+    trackPlayerSlot,
+    distMin: parseFloat(document.getElementById("head-dist-min")?.value ?? "5"),
+    distMax: parseFloat(document.getElementById("head-dist-max")?.value ?? "80"),
+    outOfRange,
+    invertX: (document.getElementById("head-invert-x")?.value ?? "0") === "1",
+    marginLeftPct: parseFloat(
+      document.getElementById("head-margin-left")?.value ?? "5",
+    ),
+    marginRightPct: parseFloat(
+      document.getElementById("head-margin-right")?.value ?? "5",
+    ),
+    posDeadband: parseFloat(
+      document.getElementById("head-pos-deadband")?.value ?? "0.02",
+    ),
+    emaAlpha: parseFloat(
+      document.getElementById("head-ema-alpha")?.value ?? "0.25",
+    ),
+    minSendMs: parseFloat(
+      document.getElementById("head-min-send-ms")?.value ?? "100",
+    ),
+    mcuPwmMax: parseFloat(
+      document.getElementById("head-mcu-pwm-max")?.value ?? "120",
+    ),
+    mcuSlew: parseFloat(document.getElementById("head-mcu-slew")?.value ?? "8"),
+    mcuPosDeadband: parseFloat(
+      document.getElementById("head-mcu-pos-db")?.value ?? "0.04",
+    ),
+    mcuTimeoutMs: parseFloat(
+      document.getElementById("head-mcu-timeout-ms")?.value ?? "4000",
+    ),
+    mcuStrokeS: parseFloat(
+      document.getElementById("head-mcu-stroke-s")?.value ?? "18",
+    ),
+    homeOnConnect:
+      (document.getElementById("head-home-on-connect")?.value ?? "0") === "1",
+  });
+
   return {
     throwMode,
     fixedRpmMin,
@@ -657,6 +1004,7 @@ function readThrowConfigFromDom() {
     tuning,
     vizDistMin: parseFloat(throwVizMinEl?.value ?? "0.5") || 0.5,
     vizDistMax: parseFloat(throwVizMaxEl?.value ?? "12") || 12,
+    headTracking,
   };
 }
 
@@ -716,8 +1064,165 @@ function loadThrowConfigFromStorage() {
 }
 
 function onThrowSettingsChanged() {
+  refreshHeadTargetOorClass();
   scheduleSaveThrowConfig();
   pushBridgeControl(lastPlayersSnapshot);
+}
+
+/**
+ * @param {number | null} rawPan
+ * @param {boolean} gateOk
+ * @param {number | null} sentPan
+ * @param {boolean} panActive
+ */
+function updateHeadTrackingLiveLabels(
+  rawPan,
+  gateOk,
+  sentPan,
+  panActive,
+  panTestOn = false,
+) {
+  const rawEl = document.getElementById("head-live-raw");
+  const gateEl = document.getElementById("head-live-gate");
+  const sentEl = document.getElementById("head-live-sent");
+  if (rawEl) {
+    rawEl.textContent =
+      rawPan != null && Number.isFinite(rawPan) ? rawPan.toFixed(3) : "—";
+  }
+  if (gateEl) {
+    if (!panActive) gateEl.textContent = "off";
+    else if (panTestOn) gateEl.textContent = "test";
+    else gateEl.textContent = gateOk ? "ok" : "blocked";
+  }
+  if (sentEl) {
+    sentEl.textContent =
+      sentPan != null && Number.isFinite(sentPan) ? sentPan.toFixed(3) : "—";
+  }
+}
+
+/**
+ * @param {Array<{ box: { cx: number }, trackId: number, meters: number | null, score: number, det: number[] }>} players
+ * @param {ReturnType<typeof normalizeHeadTracking>} ht
+ * @param {boolean} motorTestOn
+ * @param {boolean} panTestOn
+ */
+function computeHeadPanForBridge(players, ht, motorTestOn, panTestOn) {
+  const plist = Array.isArray(players) ? players : [];
+  /** @type {Record<string, number>} */
+  const pan_tuning = {
+    pan_pwm_max: ht.mcuPwmMax,
+    pan_slew: ht.mcuSlew,
+    pan_db: ht.mcuPosDeadband,
+    pan_timeout_ms: ht.mcuTimeoutMs,
+    pan_stroke_s: ht.mcuStrokeS,
+  };
+
+  if (motorTestOn) {
+    return {
+      panEnable: false,
+      panTarget: null,
+      pan_tuning,
+      rawPan: null,
+      gateOk: false,
+      sentForDisplay: null,
+      panTestOn: false,
+    };
+  }
+
+  if (panTestOn) {
+    const v = Math.min(
+      1,
+      Math.max(0, (parseFloat(panTestSliderEl?.value ?? "0") || 0) / 100),
+    );
+    return {
+      panEnable: true,
+      panTarget: v,
+      pan_tuning,
+      rawPan: v,
+      gateOk: true,
+      sentForDisplay: v,
+      panTestOn: true,
+    };
+  }
+
+  if (!ht.enabled) {
+    headPanEma = null;
+    lastSentPanTarget = null;
+    return {
+      panEnable: false,
+      panTarget: null,
+      pan_tuning,
+      rawPan: null,
+      gateOk: false,
+      sentForDisplay: null,
+      panTestOn: false,
+    };
+  }
+
+  const slot = ht.trackPlayerSlot;
+  if (plist.length === 0 || slot < 0 || slot >= plist.length) {
+    headPanEma = null;
+    lastSentPanTarget = null;
+    return {
+      panEnable: false,
+      panTarget: null,
+      pan_tuning,
+      rawPan: null,
+      gateOk: false,
+      sentForDisplay: null,
+      panTestOn: false,
+    };
+  }
+
+  const pl = plist[slot];
+  const wDet = lastDetSizes?.[0] ?? 640;
+  const ml = ht.marginLeftPct / 100;
+  const mr = ht.marginRightPct / 100;
+  let span = 1 - ml - mr;
+  if (span < 0.05) span = 0.05;
+  let t = (pl.box.cx / wDet - ml) / span;
+  t = Math.min(1, Math.max(0, t));
+  if (ht.invertX) t = 1 - t;
+  const rawPan = t;
+
+  const m = pl.meters;
+  const gateOk =
+    m != null && Number.isFinite(m) && m >= ht.distMin && m <= ht.distMax;
+
+  let cmd;
+  if (gateOk) {
+    headPanEma =
+      headPanEma == null
+        ? t
+        : ht.emaAlpha * t + (1 - ht.emaAlpha) * headPanEma;
+    cmd = headPanEma;
+  } else if (ht.outOfRange === "hold_last") {
+    cmd = headPanEma ?? 0.5;
+  } else if (ht.outOfRange === "retract") {
+    cmd = 0;
+  } else {
+    cmd = 0.5;
+  }
+
+  let sendPan = cmd;
+  if (
+    lastSentPanTarget != null &&
+    Math.abs(cmd - lastSentPanTarget) < ht.posDeadband
+  ) {
+    sendPan = lastSentPanTarget;
+  } else {
+    lastSentPanTarget = cmd;
+  }
+
+  return {
+    panEnable: true,
+    panTarget: sendPan,
+    pan_tuning,
+    rawPan,
+    gateOk,
+    sentForDisplay: sendPan,
+    panTestOn: false,
+  };
 }
 
 function initThrowTuningUi() {
@@ -778,6 +1283,7 @@ function initThrowTuningUi() {
   updateBandRowVisibility();
   updateThrowPanelDisabledState();
   updateThrowLiveReadout();
+  updateHeadTargetPlayerSelect(lastPlayersSnapshot);
 
   btnManualFire?.addEventListener("click", () => {
     bridge.sendFeedOnce();
@@ -797,7 +1303,11 @@ function initThrowTuningUi() {
   if (motorTestPctEl && motorTestSliderEl) {
     motorTestPctEl.textContent = `${motorTestSliderEl.value}%`;
   }
+  if (panTestPctEl && panTestSliderEl) {
+    panTestPctEl.textContent = `${panTestSliderEl.value}%`;
+  }
   motorTestEnableEl?.addEventListener("change", () => {
+    if (motorTestEnableEl?.checked && panTestEnableEl) panTestEnableEl.checked = false;
     syncMotorTestUi();
     pushBridgeControl(lastPlayersSnapshot);
   });
@@ -811,6 +1321,12 @@ function initThrowTuningUi() {
     if (motorTestPctEl) motorTestPctEl.textContent = `${motorTestSliderEl.value}%`;
     if (motorTestEnableEl?.checked && bridge.isConnected()) {
       const cfg = readThrowConfigFromDom();
+      const panT = computeHeadPanForBridge(
+        lastPlayersSnapshot,
+        cfg.headTracking,
+        true,
+        false,
+      );
       bridge.setControl({
         target_m: null,
         armed: false,
@@ -823,11 +1339,55 @@ function initThrowTuningUi() {
         auto_feed_dwell: false,
         test_mode: true,
         test_pwm: parseFloat(motorTestSliderEl.value) || 0,
+        pan_enable: false,
+        pan_target: null,
+        pan_tuning: panT.pan_tuning,
       });
       bridge.flush();
     }
   });
+  panTestEnableEl?.addEventListener("change", () => {
+    if (panTestEnableEl?.checked && motorTestEnableEl) motorTestEnableEl.checked = false;
+    syncMotorTestUi();
+    pushBridgeControl(lastPlayersSnapshot, { panForceSerial: true });
+  });
+  panTestSliderEl?.addEventListener("input", () => {
+    if (panTestPctEl) panTestPctEl.textContent = `${panTestSliderEl.value}%`;
+    if (panTestEnableEl?.checked && bridge.isConnected()) {
+      pushBridgeControl(lastPlayersSnapshot);
+    }
+  });
   syncMotorTestUi();
+
+  const headFieldIds = [
+    "head-enable",
+    "head-target-player",
+    "head-dist-min",
+    "head-dist-max",
+    "head-out-of-range",
+    "head-invert-x",
+    "head-margin-left",
+    "head-margin-right",
+    "head-pos-deadband",
+    "head-ema-alpha",
+    "head-min-send-ms",
+    "head-mcu-pwm-max",
+    "head-mcu-slew",
+    "head-mcu-pos-db",
+    "head-mcu-timeout-ms",
+    "head-mcu-stroke-s",
+    "head-home-on-connect",
+  ];
+  for (const id of headFieldIds) {
+    document.getElementById(id)?.addEventListener("change", onCh);
+  }
+
+  document.getElementById("btn-pan-home")?.addEventListener("click", () => {
+    bridge.sendPanHome();
+    appendActivityLine("Sent PAN_HOME (MCU retract / homing).", "info");
+  });
+
+  bridge.setThrottleMs(readThrowConfigFromDom().headTracking.minSendMs);
 }
 
 function setMachineVisualState(stateRaw) {
@@ -1516,6 +2076,7 @@ function updateRoster(players) {
     selectedSlotIndex = null;
     playerRosterEl.innerHTML =
       '<p class="player-deck-empty">No targets</p>';
+    updateHeadTargetPlayerSelect(players);
     return;
   }
 
@@ -1589,6 +2150,8 @@ function updateRoster(players) {
 
     playerRosterEl.appendChild(btn);
   });
+
+  updateHeadTargetPlayerSelect(players);
 }
 
 function updateMachinePanel() {
@@ -1700,7 +2263,6 @@ function updateMachinePanel() {
         ? telemetry.rpm.toFixed(0)
         : "—";
   }
-  syncMotorTestUi();
 
   updateThrowLiveReadout();
 }
@@ -1708,6 +2270,7 @@ function updateMachinePanel() {
 function maybeAutoFeedOnce() {
   const cfg = readThrowConfigFromDom();
   if (cfg.throwMode !== "manual" || !throwAutoFireEl?.checked) return;
+  if (motorTestEnableEl?.checked || panTestEnableEl?.checked) return;
   if (!bridge.isConnected() || !armCheckbox.checked) return;
   const intervalMs =
     (parseFloat(String(throwAutoFireIntervalEl?.value ?? "5")) || 5) * 1000;
@@ -1816,6 +2379,18 @@ bridge.setOnConnectionEvent((ev) => {
     setAlertBanner("");
     appendActivityLine("WebSocket connection open — telemetry streaming.", "info");
     bridge.flush();
+    try {
+      const c = readThrowConfigFromDom();
+      if (c.headTracking.homeOnConnect) {
+        bridge.sendPanHome();
+        appendActivityLine("Sent PAN_HOME (on connect).", "info");
+      }
+    } catch {
+      /* ignore */
+    }
+    if (panTestEnableEl?.checked) {
+      pushBridgeControl(lastPlayersSnapshot, { panForceSerial: true });
+    }
   } else if (ev.type === "close") {
     setBridgeOrbVisual("offline");
     setBridgeStatusText("Bridge offline");
@@ -1967,23 +2542,61 @@ function drawDepthHeatmap(data, ow, oh, min, max) {
 }
 
 function syncMotorTestUi() {
-  const on = motorTestEnableEl?.checked ?? false;
+  const wheelOn = motorTestEnableEl?.checked ?? false;
+  const panOn = panTestEnableEl?.checked ?? false;
+  const benchOn = wheelOn || panOn;
   const connected = bridge.isConnected();
-  document.body.classList.toggle("app-motor-test", on);
-  // Slider: draggable whenever bridge is online (checkbox gates MCU test mode + dimming).
-  if (motorTestSliderEl) motorTestSliderEl.disabled = !connected;
-  if (servoTestFeedBtnEl) servoTestFeedBtnEl.disabled = !connected;
+  document.body.classList.toggle("app-motor-test", wheelOn);
+  document.body.classList.toggle("app-pan-test", panOn);
+  if (motorTestSliderEl) motorTestSliderEl.disabled = !connected || panOn;
+  if (motorTestEnableEl) motorTestEnableEl.disabled = panOn;
+  /* Pan slider: same rule as wheel slider — online + mode on (see CSS for stacking). */
+  if (panTestSliderEl) {
+    panTestSliderEl.disabled = !connected || !panOn;
+  }
+  if (panTestEnableEl) panTestEnableEl.disabled = wheelOn;
+  if (servoTestFeedBtnEl) servoTestFeedBtnEl.disabled = !connected || benchOn;
   if (armCheckbox) {
-    armCheckbox.disabled = !connected || on;
-    if (on) armCheckbox.checked = false;
+    armCheckbox.disabled = !connected || benchOn;
+    if (benchOn) armCheckbox.checked = false;
+  }
+  if (btnManualFire) btnManualFire.disabled = !connected || benchOn;
+  if (throwAutoFireEl) throwAutoFireEl.disabled = benchOn;
+  if (throwAutoFireIntervalEl) throwAutoFireIntervalEl.disabled = benchOn;
+  if (panTestPctEl && panTestSliderEl) {
+    panTestPctEl.textContent = `${panTestSliderEl.value}%`;
   }
 }
 
-function pushBridgeControl(players) {
-  if (!bridge.isConnected()) return;
+/**
+ * @param {unknown} players
+ * @param {{ panForceSerial?: boolean }} [opts]
+ */
+function pushBridgeControl(players, opts = {}) {
+  const panForceSerial = opts.panForceSerial === true;
+  const rawPl = Array.isArray(players) ? players : lastPlayersSnapshot;
+  const plArr = Array.isArray(rawPl) ? rawPl : [];
+  updateHeadTargetPlayerSelect(plArr);
 
   const cfg = readThrowConfigFromDom();
+  bridge.setThrottleMs(cfg.headTracking.minSendMs);
   const motorTestOn = motorTestEnableEl?.checked ?? false;
+  const panTestOn = panTestEnableEl?.checked ?? false;
+  const pan = computeHeadPanForBridge(
+    plArr,
+    cfg.headTracking,
+    motorTestOn,
+    panTestOn,
+  );
+  updateHeadTrackingLiveLabels(
+    pan.rawPan,
+    pan.gateOk,
+    pan.panEnable ? pan.sentForDisplay : null,
+    pan.panEnable,
+    pan.panTestOn,
+  );
+
+  if (!bridge.isConnected()) return;
 
   if (motorTestOn) {
     bridge.setControl({
@@ -1997,6 +2610,9 @@ function pushBridgeControl(players) {
       auto_feed_dwell: false,
       test_mode: true,
       test_pwm: parseFloat(motorTestSliderEl?.value ?? "0") || 0,
+      pan_enable: false,
+      pan_target: null,
+      pan_tuning: pan.pan_tuning,
     });
     bridge.flush();
     if (noPlayerDisarmTimer) {
@@ -2014,8 +2630,8 @@ function pushBridgeControl(players) {
   let selectedId = null;
 
   if (isAuto) {
-    if (players.length > 0 && selectedSlotIndex != null) {
-      const pl = players[selectedSlotIndex];
+    if (plArr.length > 0 && selectedSlotIndex != null) {
+      const pl = plArr[selectedSlotIndex];
       selectedId = selectedSlotIndex + 1;
       if (pl.meters != null && Number.isFinite(pl.meters)) {
         targetM = pl.meters;
@@ -2033,7 +2649,7 @@ function pushBridgeControl(players) {
     !effectiveArm &&
     armCheckbox.checked &&
     isAuto &&
-    players.length > 0 &&
+    plArr.length > 0 &&
     !targetM
   ) {
     setAlertBanner(
@@ -2088,10 +2704,19 @@ function pushBridgeControl(players) {
     auto_feed_dwell: isAuto,
     test_mode: false,
     test_pwm: 0,
+    pan_enable: pan.panEnable,
+    pan_target: pan.panTarget,
+    pan_tuning: pan.pan_tuning,
+    pan_force_serial: panForceSerial,
   });
+  if (panForceSerial) {
+    bridge.flushForce();
+  } else if (panTestOn) {
+    bridge.flush();
+  }
 
   const disarmWhenNoPlayers = isAuto;
-  if (players.length === 0 && armCheckbox.checked && disarmWhenNoPlayers) {
+  if (plArr.length === 0 && armCheckbox.checked && disarmWhenNoPlayers) {
     if (!noPlayerDisarmTimer) {
       noPlayerDisarmTimer = window.setTimeout(() => {
         armCheckbox.checked = false;
@@ -2122,6 +2747,7 @@ function updateCanvas() {
   if (!isProcessing) {
     isProcessing = true;
     (async function () {
+      try {
       const pixelData = context.getImageData(0, 0, width, height).data;
       const image = new RawImage(pixelData, width, height, 4);
 
@@ -2255,7 +2881,9 @@ function updateCanvas() {
         statusEl.textContent = `FPS: ${fps.toFixed(2)}`;
       }
       previousTime = performance.now();
-      isProcessing = false;
+      } finally {
+        isProcessing = false;
+      }
     })();
   }
 

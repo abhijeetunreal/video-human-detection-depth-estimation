@@ -1,7 +1,10 @@
 /**
- * Ball thrower: IR slot/reflection RPM (interrupt), BTS7960B (single-direction PWM), feeder servo.
+ * Ball thrower: IR slot/reflection RPM (interrupt), BTS7960B (wheel PWM), second BTS7960B (12V linear
+ * actuator pan), feeder servo.
  * Serial 115200: TARGET_M, TARGET_RPM [min [max]], AUTO_RPM, SET_BAND*, ARM, DISARM, STOP,
  *   TEST_MODE 0|1, TEST_PWM <0..PWM_MAX>, SERVO_TEST (fast 0°→180°, 1s hold, fast→0°), SET_* tuning,
+ *   PAN_ENABLE 0|1, PAN_TARGET 0..1, PAN_HOME (retract to limit), SET_PAN_PWM_MAX, SET_PAN_SLEW,
+ *   SET_PAN_DB, SET_PAN_TIMEOUT_MS, SET_PAN_STROKE_S,
  *   SET_RPM_EMA, SET_PWM_SLEW, SET_IR_DROPOUT_MS, SET_IR_SILENCE_MS, SET_RPM_DECAY (gentle IR RPM),
  *   SET_IR_MAX_INSTANT_RPM (reject EMI spikes on IR line),
  *   SET_KD, SET_RPM_FF, SET_D_MAX (PID + feed-forward)
@@ -25,6 +28,14 @@ static const int SERVO_US_MAX = 2000;
 static const uint32_t SERVO_TEST_HOLD_AT_180_MS = 1000u;
 // IR RPM (FC-51-style); Uno/Nano: use pin 2 or 3 for external interrupt.
 static const uint8_t PIN_IR_RPM = 2;
+
+// Second BTS7960: 12 V linear actuator (head pan). Uno: PWM on 6 and 11 (not 9/10 — servo).
+static const uint8_t PIN_PAN_RPWM = 6;
+static const uint8_t PIN_PAN_LPWM = 11;
+static const uint8_t PIN_PAN_REN = 12;
+static const uint8_t PIN_PAN_LEN = 13;
+/** INPUT_PULLUP: LOW when fully retracted (optional; PAN_HOME stops here). */
+static const uint8_t PIN_PAN_LIMIT = 4;
 
 // IR wheel: marks/slots per full revolution (must match physical wheel).
 static const int pulsesPerRevolution = 20;
@@ -81,6 +92,22 @@ static bool g_autoFeedFromDwell = true;
 /** Open-loop bench test: direct PWM; blocks other serial commands until TEST_MODE 0 / STOP / DISARM */
 static bool g_testMode = false;
 static float g_testPwm = 0.0f;
+
+/** Linear actuator pan (second BTS7960); host sends PAN_TARGET 0=retracted .. 1=extended */
+static bool g_panEnabled = false;
+static float g_panTarget = 0.5f;
+static float g_panEstimated = 0.5f;
+static float g_panPwmMax = 120.0f;
+static float g_panSlewPerTick = 8.0f;
+static float g_panDb = 0.04f;
+static uint32_t g_panTimeoutMs = 4000;
+static float g_panStrokeSec = 18.0f;
+static float g_panSlewOut = 0.0f;
+static bool g_panHoming = false;
+static uint32_t g_panHomeStartMs = 0;
+static uint32_t g_panLastTickMs = 0;
+static int8_t g_panMoveSign = 0;
+static uint32_t g_panMoveStartMs = 0;
 
 // PI + filtered D on measurement; SET_KP / SET_KI / SET_KD / SET_RPM_FF / SET_D_MAX
 static float g_kp = 2.0f;
@@ -311,6 +338,113 @@ static void motorStop() {
   resetPidDerivativeState();
 }
 
+static void panMotorStop() {
+  analogWrite(PIN_PAN_RPWM, 0);
+  analogWrite(PIN_PAN_LPWM, 0);
+  g_panSlewOut = 0.0f;
+}
+
+static void panMotorExtend(float pwm) {
+  if (pwm < 0.0f) pwm = 0.0f;
+  if (pwm > g_panPwmMax) pwm = g_panPwmMax;
+  int p = (int)(pwm + 0.5f);
+  analogWrite(PIN_PAN_RPWM, p);
+  analogWrite(PIN_PAN_LPWM, 0);
+}
+
+static void panMotorRetract(float pwm) {
+  if (pwm < 0.0f) pwm = 0.0f;
+  if (pwm > g_panPwmMax) pwm = g_panPwmMax;
+  int p = (int)(pwm + 0.5f);
+  analogWrite(PIN_PAN_RPWM, 0);
+  analogWrite(PIN_PAN_LPWM, p);
+}
+
+static void panResetMotionTimeout() {
+  g_panMoveSign = 0;
+  g_panMoveStartMs = 0;
+}
+
+static void updatePanMotor(uint32_t now) {
+  if (g_testMode) {
+    panMotorStop();
+    g_panHoming = false;
+    return;
+  }
+
+  if (g_panHoming) {
+    bool atLimit = (digitalRead(PIN_PAN_LIMIT) == LOW);
+    if (atLimit) {
+      g_panEstimated = 0.0f;
+      g_panHoming = false;
+      panMotorStop();
+      return;
+    }
+    if (now - g_panHomeStartMs > 12000UL) {
+      g_panHoming = false;
+      panMotorStop();
+      return;
+    }
+    panMotorRetract(85.0f);
+    return;
+  }
+
+  if (!g_panEnabled) {
+    panMotorStop();
+    panResetMotionTimeout();
+    return;
+  }
+
+  if (g_panLastTickMs == 0) g_panLastTickMs = now;
+  uint32_t dt = now - g_panLastTickMs;
+  if (dt < 25) return;
+  g_panLastTickMs = now;
+  float dtSec = (float)dt / 1000.0f;
+
+  float err = g_panTarget - g_panEstimated;
+  if (fabs(err) < g_panDb) {
+    panMotorStop();
+    panResetMotionTimeout();
+    return;
+  }
+
+  int8_t sign = (err > 0.0f) ? 1 : -1;
+  if (g_panMoveSign != sign) {
+    g_panMoveSign = sign;
+    g_panMoveStartMs = now;
+  }
+  if (g_panMoveStartMs > 0 && (now - g_panMoveStartMs) > g_panTimeoutMs) {
+    panMotorStop();
+    panResetMotionTimeout();
+    return;
+  }
+
+  float want = fabs(err) * 3.5f * g_panPwmMax;
+  if (want < 28.0f) want = 28.0f;
+  if (want > g_panPwmMax) want = g_panPwmMax;
+
+  if (want > g_panSlewOut + g_panSlewPerTick) {
+    g_panSlewOut += g_panSlewPerTick;
+  } else if (want < g_panSlewOut - g_panSlewPerTick) {
+    g_panSlewOut -= g_panSlewPerTick;
+  } else {
+    g_panSlewOut = want;
+  }
+
+  float rate = (g_panSlewOut / g_panPwmMax) * (dtSec / g_panStrokeSec);
+  if (g_panStrokeSec < 0.5f) g_panStrokeSec = 0.5f;
+
+  if (sign > 0) {
+    panMotorExtend(g_panSlewOut);
+    g_panEstimated += rate;
+    if (g_panEstimated > 1.0f) g_panEstimated = 1.0f;
+  } else {
+    panMotorRetract(g_panSlewOut);
+    g_panEstimated -= rate;
+    if (g_panEstimated < 0.0f) g_panEstimated = 0.0f;
+  }
+}
+
 static void setState(RunState s) {
   state = s;
 }
@@ -409,6 +543,9 @@ static void handleCommand(const String& line) {
     armed = false;
     g_servoTestActive = false;
     motorStop();
+    panMotorStop();
+    g_panHoming = false;
+    g_panEnabled = false;
     pwmOut = 0.0f;
     integral = 0.0f;
     dwellAccumMs = 0;
@@ -435,6 +572,8 @@ static void handleCommand(const String& line) {
       feeder.write(0);
       pwmOut = 0.0f;
       motorStop();
+      panMotorStop();
+      g_panHoming = false;
       if (state != ST_FAULT) setState(ST_IDLE);
       Serial.println(F("ACK TEST_MODE 1"));
     } else {
@@ -442,6 +581,7 @@ static void handleCommand(const String& line) {
       g_testPwm = 0.0f;
       g_servoTestActive = false;
       motorStop();
+      panMotorStop();
       pwmOut = 0.0f;
       Serial.println(F("ACK TEST_MODE 0"));
     }
@@ -467,12 +607,44 @@ static void handleCommand(const String& line) {
     return;
   }
 
+  if (upper.startsWith(F("PAN_ENABLE"))) {
+    int sp = upper.indexOf(' ');
+    if (sp < 0) return;
+    int v = upper.substring(sp + 1).toInt();
+    g_panEnabled = (v != 0);
+    if (!g_panEnabled) {
+      panMotorStop();
+      panResetMotionTimeout();
+    }
+    Serial.print(F("ACK PAN_ENABLE "));
+    Serial.println(g_panEnabled ? 1 : 0);
+    return;
+  }
+  if (upper.startsWith(F("PAN_TARGET"))) {
+    int sp = upper.indexOf(' ');
+    if (sp < 0) return;
+    float p = upper.substring(sp + 1).toFloat();
+    if (p < 0.0f) p = 0.0f;
+    if (p > 1.0f) p = 1.0f;
+    g_panTarget = p;
+    Serial.print(F("ACK PAN_TARGET "));
+    Serial.println(p, 3);
+    return;
+  }
+  if (s.equalsIgnoreCase("PAN_HOME")) {
+    g_panHoming = true;
+    g_panHomeStartMs = millis();
+    Serial.println(F("ACK PAN_HOME"));
+    return;
+  }
+
   if (g_testMode) {
     if (s == F("DISARM")) {
       g_testMode = false;
       g_testPwm = 0.0f;
       armed = false;
       motorStop();
+      panMotorStop();
       pwmOut = 0.0f;
       integral = 0.0f;
       dwellAccumMs = 0;
@@ -726,6 +898,41 @@ static void handleCommand(const String& line) {
     if (sp < 0) return;
     float v = s.substring(sp + 1).toFloat();
     if (v >= 80.0f && v <= 800.0f) g_irMaxInstantRpm = v;
+    return;
+  }
+  if (s.startsWith(F("SET_PAN_PWM_MAX"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 10.0f && v <= 255.0f) g_panPwmMax = v;
+    return;
+  }
+  if (s.startsWith(F("SET_PAN_SLEW"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 1.0f && v <= 255.0f) g_panSlewPerTick = v;
+    return;
+  }
+  if (s.startsWith(F("SET_PAN_DB"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 0.005f && v <= 0.5f) g_panDb = v;
+    return;
+  }
+  if (s.startsWith(F("SET_PAN_TIMEOUT_MS"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    uint32_t v = (uint32_t)s.substring(sp + 1).toInt();
+    if (v >= 200u && v <= 30000u) g_panTimeoutMs = v;
+    return;
+  }
+  if (s.startsWith(F("SET_PAN_STROKE_S"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 0.5f && v <= 120.0f) g_panStrokeSec = v;
     return;
   }
   if (s.startsWith(F("TARGET_M"))) {
@@ -986,6 +1193,15 @@ void setup() {
   pinMode(PIN_IR_RPM, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PIN_IR_RPM), recordIrPulse, FALLING);
 
+  pinMode(PIN_PAN_REN, OUTPUT);
+  pinMode(PIN_PAN_LEN, OUTPUT);
+  digitalWrite(PIN_PAN_REN, HIGH);
+  digitalWrite(PIN_PAN_LEN, HIGH);
+  pinMode(PIN_PAN_RPWM, OUTPUT);
+  pinMode(PIN_PAN_LPWM, OUTPUT);
+  pinMode(PIN_PAN_LIMIT, INPUT_PULLUP);
+  panMotorStop();
+
   feeder.attach(PIN_SERVO, SERVO_US_MIN, SERVO_US_MAX);
   feeder.write(0);
   delay(400);
@@ -1015,6 +1231,7 @@ void loop() {
     lastIrDecayMs = now;
     applyIrRpmDropoutDecay(irSincePulseUs());
   }
+  updatePanMotor(now);
   if (g_testMode) {
     motorPwmForward(g_testPwm);
     pwmOut = g_testPwm;

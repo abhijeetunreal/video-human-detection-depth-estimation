@@ -1407,6 +1407,124 @@ fieldset:disabled .field-label {
   box-shadow: 0 0 0 1px var(--vscode-focus);
 }
 
+.field-label--inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+  margin: 0.35rem 0 0.25rem;
+}
+
+.head-tracking-card {
+  margin-top: 0.65rem;
+}
+
+.head-tracking-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.head-tracking-fields--essential {
+  margin-bottom: 0.25rem;
+}
+
+details.head-tracking-advanced {
+  margin-top: 0.35rem;
+}
+
+details.head-tracking-advanced > summary {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--vscode-foreground, inherit);
+  list-style-position: outside;
+}
+
+details.head-tracking-advanced[open] > summary {
+  margin-bottom: 0.15rem;
+}
+
+.head-tracking-advanced-lead {
+  margin: 0 0 0.5rem;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.head-tracking-advanced-heading {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.035em;
+  color: var(--text-dim);
+  margin: 0.65rem 0 0.3rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.22));
+}
+
+.head-tracking-advanced-heading:first-of-type {
+  margin-top: 0.2rem;
+  padding-top: 0;
+  border-top: none;
+}
+
+.head-tracking-field .field-label {
+  display: block;
+  margin-bottom: 0.2rem;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.head-tracking-field .field-input-wide {
+  width: 100%;
+  max-width: none;
+}
+
+.pan-test-block {
+  margin-top: 0.75rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  position: relative;
+  z-index: 5;
+  pointer-events: auto;
+}
+
+.pan-test-block input[type="range"],
+.pan-test-block .motor-test-slider {
+  pointer-events: auto !important;
+  touch-action: none;
+  position: relative;
+  z-index: 6;
+}
+
+select#head-target-player.head-target-player--oor {
+  border-color: #c45c5c;
+  color: #e8a0a0;
+}
+
+.head-tracking-live {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.45rem;
+  align-items: center;
+  font-size: 0.72rem;
+  margin: 0.4rem 0 0.45rem;
+  font-family: var(--mono);
+}
+
+.head-tracking-live-sep {
+  opacity: 0.45;
+}
+
+.head-tracking-grid .head-tracking-span2 {
+  grid-column: 1 / -1;
+}
+
+.head-tracking-actions {
+  margin-top: 0.45rem;
+}
+
 .throw-viz-row {
   display: flex;
   flex-wrap: wrap;
@@ -2585,37 +2703,45 @@ body.machine-test {
 }
 
 /* Dim tracking column; parent opacity applies to subtree — pointer-events must be off on descendants too */
-body.app-motor-test #panel-tracking {
+body.app-motor-test #panel-tracking,
+body.app-pan-test #panel-tracking {
   pointer-events: none;
   opacity: 0.48;
 }
 
-body.app-motor-test #panel-tracking * {
+body.app-motor-test #panel-tracking *,
+body.app-pan-test #panel-tracking * {
   pointer-events: none !important;
 }
 
 body.app-motor-test #kinetic-panel,
-body.app-motor-test #kinetic-panel * {
+body.app-motor-test #kinetic-panel *,
+body.app-pan-test #kinetic-panel,
+body.app-pan-test #kinetic-panel * {
   pointer-events: none !important;
 }
 
-body.app-motor-test #kinetic-panel {
+body.app-motor-test #kinetic-panel,
+body.app-pan-test #kinetic-panel {
   opacity: 0.48;
 }
 
 /* Keep machine column above neighbors so no overlapping region steals slider drags */
-body.app-motor-test #panel-machine {
+body.app-motor-test #panel-machine,
+body.app-pan-test #panel-machine {
   position: relative;
   z-index: 20;
 }
 
-body.app-motor-test #panel-machine > .panel-local-tabs {
+body.app-motor-test #panel-machine > .panel-local-tabs,
+body.app-pan-test #panel-machine > .panel-local-tabs {
   pointer-events: auto;
   position: relative;
   z-index: 1;
 }
 
-body.app-motor-test .motor-test-card {
+body.app-motor-test .motor-test-card,
+body.app-pan-test .motor-test-card {
   pointer-events: auto;
   opacity: 1;
   position: relative;
@@ -2623,7 +2749,15 @@ body.app-motor-test .motor-test-card {
   isolation: isolate;
 }
 
-body.app-motor-test .dash-header .arm-latch input {
+/* Pan test: motor card sits above kinetic schematic so the range input is not covered. */
+body.app-pan-test #motor-test-panel {
+  position: relative;
+  z-index: 30;
+  isolation: isolate;
+}
+
+body.app-motor-test .dash-header .arm-latch input,
+body.app-pan-test .dash-header .arm-latch input {
   pointer-events: none;
   opacity: 0.45;
 }

@@ -29,6 +29,7 @@ export function createMachineBridge() {
 
   let lastSent = "";
   let throttleTimer = 0;
+  let throttleMs = DEFAULT_INTERVAL_MS;
   /**
    * @type {{
    *   target_m: number | null,
@@ -41,6 +42,10 @@ export function createMachineBridge() {
    *   auto_feed_dwell: boolean | undefined,
    *   test_mode: boolean | undefined,
    *   test_pwm: number | undefined,
+   *   pan_enable: boolean | undefined,
+   *   pan_target: number | null | undefined,
+   *   pan_tuning: Record<string, number> | undefined,
+   *   pan_force_serial: boolean | undefined,
    * } | null}
    */
   let pending = null;
@@ -58,6 +63,10 @@ export function createMachineBridge() {
       auto_feed_dwell: true,
       test_mode: false,
       test_pwm: 0,
+      pan_enable: false,
+      pan_target: null,
+      pan_tuning: undefined,
+      pan_force_serial: false,
     };
   }
 
@@ -74,9 +83,26 @@ export function createMachineBridge() {
     ws.send(payload);
   }
 
+  function flushForce() {
+    throttleTimer = 0;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !pending) return;
+    const payload = JSON.stringify(pending);
+    lastSent = payload;
+    ws.send(payload);
+  }
+
   function scheduleSend() {
     if (throttleTimer) return;
-    throttleTimer = window.setTimeout(flush, DEFAULT_INTERVAL_MS);
+    throttleTimer = window.setTimeout(flush, throttleMs);
+  }
+
+  /**
+   * @param {number} ms
+   */
+  function setThrottleMs(ms) {
+    const n = Number(ms);
+    throttleMs =
+      Number.isFinite(n) && n >= 20 && n <= 5000 ? Math.round(n) : DEFAULT_INTERVAL_MS;
   }
 
   /**
@@ -91,10 +117,16 @@ export function createMachineBridge() {
    *   auto_feed_dwell: boolean,
    *   test_mode: boolean,
    *   test_pwm: number,
+   *   pan_enable: boolean,
+   *   pan_target: number | null,
+   *   pan_tuning: Record<string, number>,
+   *   pan_force_serial: boolean,
    * }>} patch
    */
   function setControl(patch) {
     const prevTestMode = pending?.test_mode ?? false;
+    const prevPanEn = pending?.pan_enable ?? false;
+    const prevPanTgt = pending?.pan_target ?? null;
     pending = {
       target_m:
         patch.target_m !== undefined ? patch.target_m : pending?.target_m ?? null,
@@ -121,10 +153,34 @@ export function createMachineBridge() {
         patch.test_mode !== undefined ? patch.test_mode : pending?.test_mode ?? false,
       test_pwm:
         patch.test_pwm !== undefined ? patch.test_pwm : pending?.test_pwm ?? 0,
+      pan_enable:
+        patch.pan_enable !== undefined
+          ? patch.pan_enable
+          : pending?.pan_enable ?? false,
+      pan_target:
+        patch.pan_target !== undefined ? patch.pan_target : pending?.pan_target ?? null,
+      pan_tuning:
+        patch.pan_tuning !== undefined ? patch.pan_tuning : pending?.pan_tuning,
+      pan_force_serial: patch.pan_force_serial === true,
     };
     const nextTestMode = pending.test_mode;
+    const nextPanEn = pending.pan_enable ?? false;
+    const nextPanTgt = pending.pan_target ?? null;
     /* Re-enabling test with same slider value reproduces the same JSON as before → flush() would skip send and bridge never sees TEST_MODE 1 again. */
     if (prevTestMode !== nextTestMode) {
+      lastSent = "";
+    }
+    const panTgtEqual =
+      (prevPanTgt == null && nextPanTgt == null) ||
+      (prevPanTgt != null &&
+        nextPanTgt != null &&
+        Number.isFinite(Number(prevPanTgt)) &&
+        Number.isFinite(Number(nextPanTgt)) &&
+        Math.abs(Number(prevPanTgt) - Number(nextPanTgt)) < 1e-9);
+    if (prevPanEn !== nextPanEn || !panTgtEqual) {
+      lastSent = "";
+    }
+    if (patch.pan_force_serial === true) {
       lastSent = "";
     }
     scheduleSend();
@@ -203,16 +259,24 @@ export function createMachineBridge() {
     ws.send(JSON.stringify({ type: "servo_test" }));
   }
 
+  function sendPanHome() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "pan_home" }));
+  }
+
   return {
     connect,
     disconnect,
     setControl,
     flush,
+    flushForce,
     isConnected,
     sendStop,
     sendBandsReset,
     sendFeedOnce,
     sendServoTest,
+    sendPanHome,
+    setThrottleMs,
     setOnTelemetry(fn) {
       onTelemetry = fn;
     },

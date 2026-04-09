@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import threading
 from pathlib import Path
 from typing import Any
@@ -103,10 +104,13 @@ def create_app(
 
     last_bands_sig: str | None = None
     last_tuning_sig: str | None = None
+    last_pan_sig: str | None = None
+    last_pan_tuning_sig: str | None = None
     last_test_on: bool = False
 
     ser: serial.Serial | None = None
     stop_reader = threading.Event()
+    reader_thread_started = False
 
     def open_serial() -> None:
         nonlocal ser
@@ -216,6 +220,79 @@ def create_app(
         except (TypeError, ValueError):
             pass
 
+    def send_pan_tuning_if_changed(pan_tuning: Any) -> None:
+        nonlocal last_pan_tuning_sig
+        if not isinstance(pan_tuning, dict):
+            return
+        sig = json.dumps(pan_tuning, sort_keys=True)
+        if sig == last_pan_tuning_sig:
+            return
+        last_pan_tuning_sig = sig
+        try:
+            if "pan_pwm_max" in pan_tuning:
+                v = int(float(pan_tuning["pan_pwm_max"]))
+                if 10 <= v <= 255:
+                    serial_write(f"SET_PAN_PWM_MAX {v}\n")
+            if "pan_slew" in pan_tuning:
+                v = int(float(pan_tuning["pan_slew"]))
+                if 1 <= v <= 255:
+                    serial_write(f"SET_PAN_SLEW {v}\n")
+            if "pan_db" in pan_tuning:
+                v = float(pan_tuning["pan_db"])
+                if 0.005 <= v <= 0.5:
+                    serial_write(f"SET_PAN_DB {v:.4f}\n")
+            if "pan_timeout_ms" in pan_tuning:
+                v = int(float(pan_tuning["pan_timeout_ms"]))
+                if 200 <= v <= 30000:
+                    serial_write(f"SET_PAN_TIMEOUT_MS {v}\n")
+            if "pan_stroke_s" in pan_tuning:
+                v = float(pan_tuning["pan_stroke_s"])
+                if 0.5 <= v <= 120.0:
+                    serial_write(f"SET_PAN_STROKE_S {v:.3f}\n")
+        except (TypeError, ValueError):
+            pass
+
+    def send_pan_command_if_changed(payload: Any) -> None:
+        nonlocal last_pan_sig
+        if not isinstance(payload, dict):
+            return
+        pe = bool(payload.get("pan_enable", False))
+        pt = payload.get("pan_target")
+        pt_f: float | None = None
+        if pe and pt is not None:
+            try:
+                pt_f = float(pt)
+                if not math.isfinite(pt_f):
+                    pe = False
+                    pt_f = None
+                else:
+                    pt_f = max(0.0, min(1.0, pt_f))
+            except (TypeError, ValueError):
+                pe = False
+                pt_f = None
+        try:
+            sig = json.dumps(
+                [pe, None if pt_f is None else round(pt_f, 3)],
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            return
+        if sig == last_pan_sig:
+            return
+        last_pan_sig = sig
+        if pe and pt_f is not None:
+            telemetry.push_bridge_line(
+                f"INFO: PAN_ENABLE 1 → PAN_TARGET {pt_f:.3f} (serial)"
+            )
+        else:
+            telemetry.push_bridge_line(
+                f"INFO: PAN_ENABLE {1 if pe else 0} (serial, target cleared)"
+            )
+        serial_write(f"PAN_ENABLE {1 if pe else 0}\n")
+        if pe and pt_f is not None:
+            serial_write(f"PAN_TARGET {pt_f:.3f}\n")
+
     def reader_loop() -> None:
         buf = bytearray()
         while not stop_reader.is_set():
@@ -256,17 +333,20 @@ def create_app(
 
     @app.on_event("startup")
     async def _startup() -> None:
+        nonlocal reader_thread_started
         open_serial()
-        reader_thread.start()
+        if not reader_thread_started:
+            reader_thread.start()
+            reader_thread_started = True
         if open_browser_url:
             import threading
             import time
             import webbrowser
 
             def open_tab() -> None:
-                time.sleep(1.8)
+                time.sleep(2.2)
                 try:
-                    webbrowser.open(open_browser_url)
+                    webbrowser.open(open_browser_url, new=1)
                     logger.info("Opened browser: %s", open_browser_url)
                 except Exception:
                     logger.warning("Could not open browser automatically")
@@ -294,7 +374,7 @@ def create_app(
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
-        nonlocal last_bands_sig, last_tuning_sig, last_test_on
+        nonlocal last_bands_sig, last_tuning_sig, last_pan_sig, last_test_on
         await ws.accept()
         telemetry.push_bridge_line(
             "INFO: WebSocket /ws accepted — telemetry + control (bridge)"
@@ -309,6 +389,8 @@ def create_app(
                 try:
                     data = json.loads(msg)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(data, dict):
                     continue
                 if data.get("type") == "stop":
                     telemetry.push_bridge_line("INFO: STOP forwarded to MCU")
@@ -326,6 +408,10 @@ def create_app(
                 if data.get("type") == "servo_test":
                     telemetry.push_bridge_line("INFO: SERVO_TEST forwarded to MCU")
                     serial_write("SERVO_TEST\n")
+                    continue
+                if data.get("type") == "pan_home":
+                    telemetry.push_bridge_line("INFO: PAN_HOME forwarded to MCU")
+                    serial_write("PAN_HOME\n")
                     continue
 
                 test_on = bool(data.get("test_mode", False))
@@ -352,62 +438,106 @@ def create_app(
                         serial_write("TEST_MODE 1\n")
                         last_test_on = True
                     serial_write(f"TEST_PWM {pwm_cmd}\n")
+                    send_pan_tuning_if_changed(data.get("pan_tuning"))
+                    send_pan_command_if_changed(
+                        {"pan_enable": False, "pan_target": None}
+                    )
                     continue
                 if last_test_on:
                     telemetry.push_bridge_line("INFO: Motor test mode OFF (TEST_MODE 0)")
                     serial_write("TEST_MODE 0\n")
                     last_test_on = False
 
-                send_bands_if_changed(data.get("bands"))
-                send_tuning_if_changed(data.get("tuning"))
+                try:
+                    send_bands_if_changed(data.get("bands"))
+                    send_tuning_if_changed(data.get("tuning"))
+                    send_pan_tuning_if_changed(data.get("pan_tuning"))
+                    if data.pop("pan_force_serial", False):
+                        last_pan_sig = None
+                        if bool(data.get("pan_enable")):
+                            telemetry.push_bridge_line(
+                                "INFO: Pan serial resync (manual pan test)"
+                            )
+                    send_pan_command_if_changed(data)
 
-                if "auto_feed_dwell" in data:
-                    af = bool(data["auto_feed_dwell"])
-                    serial_write(f"AUTO_FEED {1 if af else 0}\n")
+                    if "auto_feed_dwell" in data:
+                        af = bool(data["auto_feed_dwell"])
+                        serial_write(f"AUTO_FEED {1 if af else 0}\n")
 
-                target_m = data.get("target_m")
-                armed = bool(data.get("armed"))
-                rpm_mode = (data.get("rpm_mode") or "auto").strip().lower()
-                manual_rpm = data.get("target_rpm_manual")
+                    target_m = data.get("target_m")
+                    armed = bool(data.get("armed"))
+                    rm_raw = data.get("rpm_mode")
+                    rpm_mode = (
+                        str(rm_raw).strip().lower()
+                        if rm_raw is not None
+                        else "auto"
+                    )
+                    if not rpm_mode:
+                        rpm_mode = "auto"
+                    manual_rpm = data.get("target_rpm_manual")
 
-                if armed:
-                    try:
-                        m = (
-                            float(target_m)
-                            if target_m is not None
-                            else 0.0
-                        )
-                    except (TypeError, ValueError):
-                        continue
-                    serial_write(f"TARGET_M {m:.3f}\n")
-                    if rpm_mode == "manual" and manual_rpm is not None:
+                    if armed:
                         try:
-                            if isinstance(manual_rpm, (list, tuple)) and len(manual_rpm) >= 2:
-                                r0 = max(0, min(500, int(float(manual_rpm[0]))))
-                                r1 = max(0, min(500, int(float(manual_rpm[1]))))
-                                if r0 > r1:
-                                    r0, r1 = r1, r0
-                                serial_write(f"TARGET_RPM {r0} {r1}\n")
-                            elif (
-                                isinstance(manual_rpm, dict)
-                                and "rpm_min" in manual_rpm
-                                and "rpm_max" in manual_rpm
-                            ):
-                                r0 = max(0, min(500, int(float(manual_rpm["rpm_min"]))))
-                                r1 = max(0, min(500, int(float(manual_rpm["rpm_max"]))))
-                                if r0 > r1:
-                                    r0, r1 = r1, r0
-                                serial_write(f"TARGET_RPM {r0} {r1}\n")
-                            else:
-                                r = max(0, min(500, int(float(manual_rpm))))
-                                serial_write(f"TARGET_RPM {r}\n")
+                            m = (
+                                float(target_m)
+                                if target_m is not None
+                                else 0.0
+                            )
                         except (TypeError, ValueError):
-                            serial_write("AUTO_RPM\n")
+                            logger.warning(
+                                "Ignoring armed message: bad target_m %r", target_m
+                            )
+                        else:
+                            serial_write(f"TARGET_M {m:.3f}\n")
+                            if rpm_mode == "manual" and manual_rpm is not None:
+                                try:
+                                    if (
+                                        isinstance(manual_rpm, (list, tuple))
+                                        and len(manual_rpm) >= 2
+                                    ):
+                                        r0 = max(
+                                            0, min(500, int(float(manual_rpm[0])))
+                                        )
+                                        r1 = max(
+                                            0, min(500, int(float(manual_rpm[1])))
+                                        )
+                                        if r0 > r1:
+                                            r0, r1 = r1, r0
+                                        serial_write(f"TARGET_RPM {r0} {r1}\n")
+                                    elif (
+                                        isinstance(manual_rpm, dict)
+                                        and "rpm_min" in manual_rpm
+                                        and "rpm_max" in manual_rpm
+                                    ):
+                                        r0 = max(
+                                            0,
+                                            min(
+                                                500,
+                                                int(float(manual_rpm["rpm_min"])),
+                                            ),
+                                        )
+                                        r1 = max(
+                                            0,
+                                            min(
+                                                500,
+                                                int(float(manual_rpm["rpm_max"])),
+                                            ),
+                                        )
+                                        if r0 > r1:
+                                            r0, r1 = r1, r0
+                                        serial_write(f"TARGET_RPM {r0} {r1}\n")
+                                    else:
+                                        r = max(0, min(500, int(float(manual_rpm))))
+                                        serial_write(f"TARGET_RPM {r}\n")
+                                except (TypeError, ValueError):
+                                    serial_write("AUTO_RPM\n")
+                            else:
+                                serial_write("AUTO_RPM\n")
+                            serial_write("ARM\n")
                     else:
-                        serial_write("AUTO_RPM\n")
-                    serial_write("ARM\n")
-                else:
-                    serial_write("DISARM\n")
+                        serial_write("DISARM\n")
+                except Exception:
+                    logger.exception("WebSocket control handling failed")
         except WebSocketDisconnect:
             pass
 

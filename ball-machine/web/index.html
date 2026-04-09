@@ -206,6 +206,34 @@
                 Run servo sweep (0°–180°–0°)
               </button>
             </div>
+            <div class="pan-test-block" role="group" aria-label="Linear actuator test">
+              <h4 class="servo-test-title">Linear actuator (pan) test</h4>
+              <p class="calibration-hint motor-test-help">
+                Manual <code>PAN_TARGET</code> 0–100% (retracted → extended). Same pattern as wheel
+                test: connect the bridge, then enable here and drag the slider. Off while
+                <strong>Send test mode</strong> is on. Arm, manual fire, auto-feed, and servo test are
+                disabled while pan test is on.
+              </p>
+              <label class="motor-test-enable-label">
+                <input type="checkbox" id="pan-test-enable" />
+                Enable pan test
+              </label>
+              <label class="field-label" for="pan-test-slider">Position</label>
+              <input
+                id="pan-test-slider"
+                type="range"
+                min="0"
+                max="100"
+                value="50"
+                step="1"
+                disabled
+                class="motor-test-slider"
+              />
+              <div class="motor-test-row">
+                <span id="pan-test-pct">50%</span>
+                <span class="muted">extended</span>
+              </div>
+            </div>
           </div>
           <div
             id="kinetic-panel"
@@ -1023,6 +1051,225 @@
                   </label>
                 </div>
               </fieldset>
+            </div>
+
+            <div
+              id="head-tracking-card"
+              class="control-card head-tracking-card"
+              aria-label="Linear actuator head tracking"
+            >
+              <h3 class="control-card-title">Head / linear actuator</h3>
+              <p class="calibration-hint throw-tuning-lead">
+                <strong>Player slots</strong> are left-to-right in frame. Distance limits gate when the
+                head may move.
+              </p>
+              <div class="head-tracking-live muted" aria-live="polite">
+                <span>Raw pan</span>
+                <span id="head-live-raw">—</span>
+                <span class="head-tracking-live-sep">·</span>
+                <span>Distance gate</span>
+                <span id="head-live-gate">—</span>
+                <span class="head-tracking-live-sep">·</span>
+                <span>Sent</span>
+                <span id="head-live-sent">—</span>
+              </div>
+              <div class="head-tracking-fields head-tracking-fields--essential">
+                <div class="head-tracking-field">
+                  <label class="field-label" for="head-enable">Head tracking</label>
+                  <select id="head-enable" class="field-input field-input-wide">
+                    <option value="0">Off</option>
+                    <option value="1">On</option>
+                  </select>
+                </div>
+                <div class="head-tracking-field">
+                  <label class="field-label" for="head-target-player">Track player</label>
+                  <select
+                    id="head-target-player"
+                    class="field-input field-input-wide"
+                    aria-label="Detected player to track with head"
+                    disabled
+                  >
+                    <option value="">No players yet</option>
+                  </select>
+                </div>
+                <div class="head-tracking-field">
+                  <label class="field-label" for="head-dist-min">Active distance min (m)</label>
+                  <select id="head-dist-min" class="field-input field-input-wide">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="5" selected>5</option>
+                    <option value="6">6</option>
+                    <option value="8">8</option>
+                    <option value="10">10</option>
+                    <option value="12">12</option>
+                    <option value="15">15</option>
+                  </select>
+                </div>
+                <div class="head-tracking-field">
+                  <label class="field-label" for="head-dist-max">Active distance max (m)</label>
+                  <select id="head-dist-max" class="field-input field-input-wide">
+                    <option value="15">15</option>
+                    <option value="20">20</option>
+                    <option value="30">30</option>
+                    <option value="40">40</option>
+                    <option value="60">60</option>
+                    <option value="80" selected>80</option>
+                    <option value="100">100</option>
+                    <option value="120">120</option>
+                    <option value="200">200</option>
+                  </select>
+                </div>
+              </div>
+              <details class="nested-details throw-advanced head-tracking-advanced">
+                <summary>Advanced — framing, smoothing &amp; MCU</summary>
+                <p class="calibration-hint head-tracking-advanced-lead">
+                  Optional tuning: out-of-range behavior, frame crop, UI smoothing, bridge send rate, and
+                  BTS7960 / actuator limits on the Arduino (<code>PAN_HOME</code> needs a retract limit
+                  switch — see firmware README).
+                </p>
+                <h4 class="head-tracking-advanced-heading">Tracking behavior</h4>
+                <div class="head-tracking-fields">
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-out-of-range">If distance outside range</label>
+                    <select id="head-out-of-range" class="field-input field-input-wide">
+                      <option value="hold_last">Hold last pan</option>
+                      <option value="retract">Command retract (0)</option>
+                      <option value="center">Command center (0.5)</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-invert-x">Invert left ↔ right</label>
+                    <select id="head-invert-x" class="field-input field-input-wide">
+                      <option value="0" selected>No</option>
+                      <option value="1">Yes</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-margin-left">Frame margin left (%)</label>
+                    <select id="head-margin-left" class="field-input field-input-wide">
+                      <option value="0">0</option>
+                      <option value="5" selected>5</option>
+                      <option value="10">10</option>
+                      <option value="15">15</option>
+                      <option value="20">20</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-margin-right">Frame margin right (%)</label>
+                    <select id="head-margin-right" class="field-input field-input-wide">
+                      <option value="0">0</option>
+                      <option value="5" selected>5</option>
+                      <option value="10">10</option>
+                      <option value="15">15</option>
+                      <option value="20">20</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-pos-deadband">UI position deadband</label>
+                    <select id="head-pos-deadband" class="field-input field-input-wide">
+                      <option value="0.01">0.01 (tight)</option>
+                      <option value="0.02" selected>0.02</option>
+                      <option value="0.03">0.03</option>
+                      <option value="0.05">0.05</option>
+                      <option value="0.08">0.08</option>
+                      <option value="0.12">0.12 (loose)</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-ema-alpha">Smoothing (EMA α)</label>
+                    <select id="head-ema-alpha" class="field-input field-input-wide">
+                      <option value="0.1">0.10 (smooth)</option>
+                      <option value="0.15">0.15</option>
+                      <option value="0.25" selected>0.25</option>
+                      <option value="0.35">0.35</option>
+                      <option value="0.5">0.50</option>
+                      <option value="0.65">0.65 (responsive)</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-min-send-ms">Min send interval (ms)</label>
+                    <select id="head-min-send-ms" class="field-input field-input-wide">
+                      <option value="50">50</option>
+                      <option value="80">80</option>
+                      <option value="100" selected>100</option>
+                      <option value="150">150</option>
+                      <option value="200">200</option>
+                      <option value="300">300</option>
+                      <option value="500">500</option>
+                    </select>
+                  </div>
+                </div>
+                <h4 class="head-tracking-advanced-heading">MCU actuator (BTS7960 pan)</h4>
+                <div class="head-tracking-fields">
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-mcu-pwm-max">Pan PWM max</label>
+                    <select id="head-mcu-pwm-max" class="field-input field-input-wide">
+                      <option value="80">80</option>
+                      <option value="100">100</option>
+                      <option value="120" selected>120</option>
+                      <option value="160">160</option>
+                      <option value="200">200</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-mcu-slew">PWM slew / tick</label>
+                    <select id="head-mcu-slew" class="field-input field-input-wide">
+                      <option value="4">4</option>
+                      <option value="6">6</option>
+                      <option value="8" selected>8</option>
+                      <option value="12">12</option>
+                      <option value="16">16</option>
+                      <option value="24">24</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-mcu-pos-db">MCU position deadband</label>
+                    <select id="head-mcu-pos-db" class="field-input field-input-wide">
+                      <option value="0.02">0.02</option>
+                      <option value="0.03">0.03</option>
+                      <option value="0.04" selected>0.04</option>
+                      <option value="0.06">0.06</option>
+                      <option value="0.08">0.08</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-mcu-timeout-ms">Max one-way drive (ms)</label>
+                    <select id="head-mcu-timeout-ms" class="field-input field-input-wide">
+                      <option value="2000">2000</option>
+                      <option value="4000" selected>4000</option>
+                      <option value="6000">6000</option>
+                      <option value="8000">8000</option>
+                      <option value="12000">12000</option>
+                      <option value="20000">20000</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-mcu-stroke-s">Full stroke @ max PWM (s)</label>
+                    <select id="head-mcu-stroke-s" class="field-input field-input-wide">
+                      <option value="10">10</option>
+                      <option value="12">12</option>
+                      <option value="15">15</option>
+                      <option value="18" selected>18</option>
+                      <option value="22">22</option>
+                      <option value="28">28</option>
+                      <option value="35">35</option>
+                    </select>
+                  </div>
+                  <div class="head-tracking-field">
+                    <label class="field-label" for="head-home-on-connect">PAN_HOME on bridge connect</label>
+                    <select id="head-home-on-connect" class="field-input field-input-wide">
+                      <option value="0" selected>No</option>
+                      <option value="1">Yes (needs limit switch)</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="head-tracking-actions">
+                  <button type="button" class="btn-secondary" id="btn-pan-home">
+                    PAN_HOME now
+                  </button>
+                </div>
+              </details>
             </div>
 
             <details class="engineering-panel">
