@@ -158,6 +158,7 @@
               >Machine</span
             >
           </nav>
+          <div class="panel-machine-body">
           <div
             class="control-card motor-test-card"
             id="motor-test-panel"
@@ -193,6 +194,17 @@
             <div class="motor-test-rpm-row">
               <span class="hud-label">RPM (IR)</span>
               <span class="hud-val" id="motor-test-rpm">—</span>
+            </div>
+            <div class="servo-test-block" role="group" aria-label="Servo feeder test">
+              <h4 class="servo-test-title">Servo feeder test</h4>
+              <p class="calibration-hint motor-test-help">
+                Moves the feeder <strong>0° → 180° → 0°</strong> once (MCU command
+                <code>SERVO_TEST</code>). Works with motor test on or off; not during an active feed
+                cycle.
+              </p>
+              <button type="button" id="servo-test-feed-btn" class="btn-secondary btn-small" disabled>
+                Run servo sweep (0°–180°–0°)
+              </button>
             </div>
           </div>
           <div
@@ -313,6 +325,7 @@
             </div>
 
             <div id="dwell-fill" class="sr-only" aria-hidden="true"></div>
+          </div>
           </div>
           </aside>
 

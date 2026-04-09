@@ -147,6 +147,7 @@ const motorTestEnableEl = document.getElementById("motor-test-enable");
 const motorTestSliderEl = document.getElementById("motor-test-slider");
 const motorTestPctEl = document.getElementById("motor-test-pct");
 const motorTestRpmEl = document.getElementById("motor-test-rpm");
+const servoTestFeedBtnEl = document.getElementById("servo-test-feed-btn");
 
 const throwTuningIds = [
   ["throw-dwell-ms", "dwell_ms"],
@@ -261,6 +262,7 @@ function highlightLogLine(raw) {
     /\b(ACK TEST_MODE \d)\b/g,
     '<span class="log-token log-token-mcu">$1</span>',
   );
+  out = out.replace(/\b(ACK SERVO_TEST)\b/g, '<span class="log-token log-token-mcu">$1</span>');
   return `<div class="log-line">${out}</div>`;
 }
 
@@ -780,6 +782,10 @@ function initThrowTuningUi() {
   btnManualFire?.addEventListener("click", () => {
     bridge.sendFeedOnce();
     appendActivityLine("Sent FEED_ONCE (manual fire).", "info");
+  });
+  servoTestFeedBtnEl?.addEventListener("click", () => {
+    bridge.sendServoTest();
+    appendActivityLine("Sent SERVO_TEST (0°→180°→0°).", "info");
   });
   throwAutoFireEl?.addEventListener("change", () => {
     lastAutoFeedAtMs = 0;
@@ -1966,6 +1972,7 @@ function syncMotorTestUi() {
   document.body.classList.toggle("app-motor-test", on);
   // Slider: draggable whenever bridge is online (checkbox gates MCU test mode + dimming).
   if (motorTestSliderEl) motorTestSliderEl.disabled = !connected;
+  if (servoTestFeedBtnEl) servoTestFeedBtnEl.disabled = !connected;
   if (armCheckbox) {
     armCheckbox.disabled = !connected || on;
     if (on) armCheckbox.checked = false;

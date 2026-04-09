@@ -60,16 +60,22 @@ Only **one program** may open the Arduino COM port at a time. Close **Arduino Se
 **Host → MCU**
 
 - `TARGET_M <float>` — target distance in meters (from vision or manual UI).
-- `TARGET_RPM <int>` or `TARGET_RPM <rpm_min> <rpm_max>` — manual RPM window (0–500 each); enables manual-RPM mode until `AUTO_RPM`. One value sets min=max; two values set the range (deadband control).
+- `TARGET_RPM <int>` or `TARGET_RPM <rpm_min> <rpm_max>` — manual RPM window (0–500 each); enables manual-RPM mode until `AUTO_RPM`. One value sets min=max; two values set a range: firmware **regulates toward the midpoint** of that range and uses dwell tolerance around the midpoint (see firmware README).
 - `AUTO_RPM` — use distance→RPM from bands (clears manual RPM override).
-- `SET_BAND <i> <min_m> <max_m> <rpm_min> <rpm_max>` — one distance band row (up to 6 rows; distance `[min,max)` in meters; MCU holds measured RPM in `[rpm_min,rpm_max]` in auto mode).
+- `SET_BAND <i> <min_m> <max_m> <rpm_min> <rpm_max>` — one distance band row (up to 6 rows; distance `[min,max)` in meters; in auto mode the MCU targets the **midpoint** of `[rpm_min,rpm_max]` and dwell uses tolerance around that midpoint).
 - `SET_BAND_COUNT <n>` — use the first `n` bands.
 - `BANDS_RESET` — restore compiled-in default bands.
 - `SET_DWELL_MS`, `SET_FEED_MS`, `SET_COOLDOWN_MS` — timing (see firmware for ranges).
-- `SET_KP`, `SET_KI`, `SET_PWM_MAX`, `SET_RPM_TOL`, `SET_STALL_PWM`, `SET_STALL_RPM` — control tuning.
+- `SET_KP`, `SET_KI`, `SET_KD`, `SET_RPM_FF`, `SET_D_MAX`, `SET_PWM_MAX`, `SET_RPM_TOL`, `SET_STALL_PWM`, `SET_STALL_RPM` — control tuning (see [firmware/README.md](firmware/README.md) for PI+D+FF and tuning order).
+- `SET_RPM_EMA`, `SET_PWM_SLEW`, `SET_IR_DROPOUT_MS`, `SET_IR_SILENCE_MS`, `SET_RPM_DECAY`, `SET_IR_MAX_INSTANT_RPM` — softer IR RPM handling and EMI spike rejection; see [firmware/README.md](firmware/README.md).
+
+IR dropout is softened in firmware; use **`SET_PWM_SLEW`** / **`SET_KP`** / **`SET_KI`** to trade smoothness vs responsiveness.
 - `ARM` / `DISARM` — allow feeder when RPM satisfied.
+- `FEED_ONCE` — start one feeder cycle (requires **`ARM`** only; does not require `TARGET_RPM` to be non-zero). Sent by the dashboard “manual fire” button.
+- `AUTO_FEED 0|1` — when `1`, dwell can auto-trigger feeding; when `0`, use `FEED_ONCE` only (manual mode uses `0`).
 - `STOP` — disarm, zero motor PWM, reset feeder to idle.
-- `TEST_MODE 0|1` — bench open-loop mode (`1` = on, direct PWM only; normal PI/arm/feed ignored). Pair with `TEST_PWM`.
+- `TEST_MODE 0|1` — bench open-loop mode (`1` = on, direct PWM only; normal PI/arm/feed ignored; **feeder is held at 0°** unless you run **`SERVO_TEST`**). Pair with `TEST_PWM`.
+- `SERVO_TEST` — one **0° → 180° → 0°** sweep for the feeder servo (also available as the **Run servo sweep** button under Motor test in the web UI).
 - `TEST_PWM <0…PWM_MAX>` — motor PWM while `TEST_MODE 1` (accelerator / bench).
 
 The web UI sends bands, timing, and RPM mode over the Python bridge; **flash the updated firmware** so these commands are recognized.

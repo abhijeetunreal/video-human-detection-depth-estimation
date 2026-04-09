@@ -1,11 +1,15 @@
 /**
  * Ball thrower: IR slot/reflection RPM (interrupt), BTS7960B (single-direction PWM), feeder servo.
  * Serial 115200: TARGET_M, TARGET_RPM [min [max]], AUTO_RPM, SET_BAND*, ARM, DISARM, STOP,
- *   TEST_MODE 0|1, TEST_PWM <0..PWM_MAX>, SET_* tuning
+ *   TEST_MODE 0|1, TEST_PWM <0..PWM_MAX>, SERVO_TEST (fast 0°→180°, 1s hold, fast→0°), SET_* tuning,
+ *   SET_RPM_EMA, SET_PWM_SLEW, SET_IR_DROPOUT_MS, SET_IR_SILENCE_MS, SET_RPM_DECAY (gentle IR RPM),
+ *   SET_IR_MAX_INSTANT_RPM (reject EMI spikes on IR line),
+ *   SET_KD, SET_RPM_FF, SET_D_MAX (PID + feed-forward)
  * Telemetry: STATE, RPM, TARGET_RPM, TARGET_RPM_MIN, TARGET_RPM_MAX, DIST_M, ERR
  */
 
 #include <Servo.h>
+#include <math.h>
 
 // --- Pin map (adjust for your wiring) ---
 // Uno: Servo library disables PWM on 9+10 — keep motor PWM off those pins.
@@ -14,6 +18,11 @@ static const uint8_t PIN_LPWM = 3;
 static const uint8_t PIN_REN = 7;
 static const uint8_t PIN_LEN = 8;
 static const uint8_t PIN_SERVO = 9;
+/** SG90-class microservo: attach maps 0°–180° to pulse width (use external 5 V + common GND). */
+static const int SERVO_US_MIN = 1000;
+static const int SERVO_US_MAX = 2000;
+/** SERVO_TEST: dwell at 180° before returning home (ms). */
+static const uint32_t SERVO_TEST_HOLD_AT_180_MS = 1000u;
 // IR RPM (FC-51-style); Uno/Nano: use pin 2 or 3 for external interrupt.
 static const uint8_t PIN_IR_RPM = 2;
 
@@ -23,8 +32,18 @@ static const int pulsesPerRevolution = 20;
 static const float maxExpectedRPM = 500.0f;
 static const unsigned long minPulseInterval =
     (unsigned long)((60000000.0 / (double)maxExpectedRPM) / (double)pulsesPerRevolution);
-static const float rpmEmaAlpha = 0.3f;
-static const unsigned long rpmPulseTimeoutUs = 500000UL;
+/** Ignore pulse-derived RPM above this (EMI can create bogus intervals). Tunable: SET_IR_MAX_INSTANT_RPM */
+static float g_irMaxInstantRpm = maxExpectedRPM * 1.2f;
+/** IR RPM EMA blend on each pulse (lower = smoother, slower). Tunable: SET_RPM_EMA */
+static float g_rpmEmaAlpha = 0.18f;
+/** After this silence (us), start coasting RPM estimate down (not instant zero). Tunable: SET_IR_DROPOUT_MS */
+static unsigned long g_irDropoutUs = 650000UL;
+/** After this silence (us), force RPM to 0 and reset pulse state. Tunable: SET_IR_SILENCE_MS */
+static unsigned long g_irSilenceUs = 1800000UL;
+/** Each control tick while in dropout, multiply rpmMeasured by this (0.85–0.99). Tunable: SET_RPM_DECAY */
+static float g_rpmDecayPerTick = 0.93f;
+/** Max |delta| PWM per control tick toward PI command (gentle torque). Tunable: SET_PWM_SLEW */
+static float g_pwmSlewPerTick = 6.0f;
 
 // Timing (defaults; runtime-tunable via serial SET_*)
 static const uint32_t TELEMETRY_MS = 120;
@@ -63,9 +82,18 @@ static bool g_autoFeedFromDwell = true;
 static bool g_testMode = false;
 static float g_testPwm = 0.0f;
 
-// PI gains (tune on hardware; SET_KP / SET_KI / ...)
-static float g_kp = 2.8f;
-static float g_ki = 0.35f;
+// PI + filtered D on measurement; SET_KP / SET_KI / SET_KD / SET_RPM_FF / SET_D_MAX
+static float g_kp = 2.0f;
+static float g_ki = 0.24f;
+/** Derivative on filtered RPM (0 = off). Typical 0.02–0.12 */
+static float g_kd = 0.05f;
+/** Feed-forward PWM bias: pwm += g_rpmFf * targetMid (0 = off). Load-dependent. */
+static float g_rpmFf = 0.0f;
+/** Clamp |derivative term| in PWM units (noise limiter). */
+static float g_dMax = 20.0f;
+/** When |err| below this (RPM), scale Kp/Ki by g_gainScaleInBand for less limit cycle. */
+static const float g_errRelaxRpm = 5.0f;
+static const float g_gainScaleInBand = 0.75f;
 static float g_pwmMax = 220.0f;
 static float g_rpmTolRatio = 0.08f;
 
@@ -88,6 +116,12 @@ int targetRpmMax = 0;
 float rpmMeasured = 0.0f;
 float integral = 0.0f;
 float pwmOut = 0.0f;
+/** Slew-limited PWM actually driving the motor (PI target is smoothed into this). */
+static float pwmApplied = 0.0f;
+/** Low-pass copy of rpm for derivative (same alpha as IR EMA). */
+static float rpmForD = 0.0f;
+static float rpmForD_prev = 0.0f;
+static bool g_pidDInitialized = false;
 
 RunState state = ST_IDLE;
 uint32_t lastTelemMs = 0;
@@ -97,6 +131,11 @@ volatile unsigned long irPulseIntervalUs = 0;
 volatile bool irNewPulse = false;
 volatile bool irIsFirstPulse = true;
 
+/** Last 3 accepted pulse intervals (us); median rejects single EMI glitches when the motor runs. */
+static unsigned long g_irIvMed[3];
+static uint8_t g_irMedW = 0;
+static uint8_t g_irMedFilled = 0;
+
 uint32_t dwellAccumMs = 0;
 uint32_t feedPhaseMs = 0;
 uint8_t feedStep = 0;
@@ -105,9 +144,63 @@ uint32_t cooldownStartMs = 0;
 uint32_t stallAccumMs = 0;
 String errMsg = "";
 
+/** Bench / UI: fast 0°→180°, hold, fast→0° without full FEEDING state. */
+static bool g_servoTestActive = false;
+static uint32_t g_servoTestPhaseMs = 0;
+
 uint32_t lastControlMs = 0;
+static uint32_t lastIrDecayMs = 0;
 
 String rxLine;
+
+static unsigned long medianIntervalU3(unsigned long a, unsigned long b, unsigned long c) {
+  unsigned long t;
+  if (a > b) {
+    t = a;
+    a = b;
+    b = t;
+  }
+  if (b > c) {
+    t = b;
+    b = c;
+    c = t;
+  }
+  if (a > b) {
+    t = a;
+    a = b;
+    b = t;
+  }
+  return b;
+}
+
+static void resetIrMedianIntervals() {
+  g_irIvMed[0] = 0;
+  g_irIvMed[1] = 0;
+  g_irIvMed[2] = 0;
+  g_irMedW = 0;
+  g_irMedFilled = 0;
+}
+
+static void pushIrIntervalForMedian(unsigned long iv) {
+  g_irIvMed[g_irMedW] = iv;
+  g_irMedW = (uint8_t)((g_irMedW + 1u) % 3u);
+  if (g_irMedFilled < 3u) {
+    g_irMedFilled++;
+  }
+}
+
+static unsigned long irMedianIntervalUs() {
+  if (g_irMedFilled == 0u) {
+    return 0;
+  }
+  if (g_irMedFilled == 1u) {
+    return g_irIvMed[0];
+  }
+  if (g_irMedFilled == 2u) {
+    return (g_irIvMed[0] + g_irIvMed[1]) / 2UL;
+  }
+  return medianIntervalU3(g_irIvMed[0], g_irIvMed[1], g_irIvMed[2]);
+}
 
 static void recordIrPulse() {
   unsigned long t = micros();
@@ -118,6 +211,7 @@ static void recordIrPulse() {
     irIsFirstPulse = false;
     return;
   }
+  /* Too soon: noise burst or PWM coupling; real slots cannot repeat faster than minPulseInterval. */
   if (dt > minPulseInterval) {
     irPulseIntervalUs = dt;
     lastIrPulseUs = t;
@@ -204,9 +298,17 @@ static void motorPwmForward(float pwm) {
   analogWrite(PIN_LPWM, 0);
 }
 
+static void resetPidDerivativeState() {
+  rpmForD = 0.0f;
+  rpmForD_prev = 0.0f;
+  g_pidDInitialized = false;
+}
+
 static void motorStop() {
   analogWrite(PIN_RPWM, 0);
   analogWrite(PIN_LPWM, 0);
+  pwmApplied = 0.0f;
+  resetPidDerivativeState();
 }
 
 static void setState(RunState s) {
@@ -277,6 +379,22 @@ static void reportTelemetry() {
   }
 }
 
+static void beginServoTest() {
+  g_servoTestActive = true;
+  g_servoTestPhaseMs = millis();
+  feeder.write(180);
+}
+
+static void updateServoTest(uint32_t now) {
+  if (!g_servoTestActive) {
+    return;
+  }
+  if (now - g_servoTestPhaseMs >= SERVO_TEST_HOLD_AT_180_MS) {
+    feeder.write(0);
+    g_servoTestActive = false;
+  }
+}
+
 static void handleCommand(const String& line) {
   String s = line;
   s.trim();
@@ -289,6 +407,7 @@ static void handleCommand(const String& line) {
     g_testMode = false;
     g_testPwm = 0.0f;
     armed = false;
+    g_servoTestActive = false;
     motorStop();
     pwmOut = 0.0f;
     integral = 0.0f;
@@ -308,6 +427,7 @@ static void handleCommand(const String& line) {
       g_testMode = true;
       g_testPwm = 0.0f;
       armed = false;
+      g_servoTestActive = false;
       integral = 0.0f;
       dwellAccumMs = 0;
       stallAccumMs = 0;
@@ -320,6 +440,7 @@ static void handleCommand(const String& line) {
     } else {
       g_testMode = false;
       g_testPwm = 0.0f;
+      g_servoTestActive = false;
       motorStop();
       pwmOut = 0.0f;
       Serial.println(F("ACK TEST_MODE 0"));
@@ -337,6 +458,15 @@ static void handleCommand(const String& line) {
     return;
   }
 
+  if (s == F("SERVO_TEST")) {
+    if (state == ST_FEEDING || state == ST_COOLDOWN) {
+      return;
+    }
+    beginServoTest();
+    Serial.println(F("ACK SERVO_TEST"));
+    return;
+  }
+
   if (g_testMode) {
     if (s == F("DISARM")) {
       g_testMode = false;
@@ -346,6 +476,7 @@ static void handleCommand(const String& line) {
       pwmOut = 0.0f;
       integral = 0.0f;
       dwellAccumMs = 0;
+      g_servoTestActive = false;
       feeder.write(0);
       if (state != ST_FAULT) setState(ST_IDLE);
       return;
@@ -357,6 +488,10 @@ static void handleCommand(const String& line) {
     armed = true;
     integral = 0.0f;
     dwellAccumMs = 0;
+    resetIrMedianIntervals();
+    rpmForD = rpmMeasured;
+    rpmForD_prev = rpmMeasured;
+    g_pidDInitialized = true;
     if (state != ST_FEEDING && state != ST_COOLDOWN && state != ST_FAULT) {
       setState(ST_SPINUP);
     }
@@ -368,12 +503,13 @@ static void handleCommand(const String& line) {
     pwmOut = 0;
     integral = 0.0f;
     dwellAccumMs = 0;
+    g_servoTestActive = false;
     feeder.write(0);
     if (state != ST_FAULT) setState(ST_IDLE);
     return;
   }
   if (s == F("FEED_ONCE")) {
-    if (!armed || targetRpmMax <= 0) return;
+    if (!armed) return;
     if (state == ST_FAULT) return;
     if (state == ST_FEEDING || state == ST_COOLDOWN) return;
     feedStep = 0;
@@ -490,6 +626,27 @@ static void handleCommand(const String& line) {
     if (v >= 0.0f && v <= 50.0f) g_ki = v;
     return;
   }
+  if (s.startsWith(F("SET_KD"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 0.0f && v <= 5.0f) g_kd = v;
+    return;
+  }
+  if (s.startsWith(F("SET_RPM_FF"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 0.0f && v <= 0.8f) g_rpmFf = v;
+    return;
+  }
+  if (s.startsWith(F("SET_D_MAX"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 1.0f && v <= 80.0f) g_dMax = v;
+    return;
+  }
   if (s.startsWith(F("SET_PWM_MAX"))) {
     int sp = s.indexOf(' ');
     if (sp < 0) return;
@@ -518,6 +675,59 @@ static void handleCommand(const String& line) {
     if (v >= 1.0f && v <= 100.0f) g_stallRpmThreshold = v;
     return;
   }
+  if (s.startsWith(F("SET_RPM_EMA"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 0.05f && v <= 0.8f) g_rpmEmaAlpha = v;
+    return;
+  }
+  if (s.startsWith(F("SET_PWM_SLEW"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 0.5f && v <= 50.0f) g_pwmSlewPerTick = v;
+    return;
+  }
+  if (s.startsWith(F("SET_IR_DROPOUT_MS"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    uint32_t ms = (uint32_t)s.substring(sp + 1).toInt();
+    if (ms >= 200u && ms <= 5000u) {
+      g_irDropoutUs = (unsigned long)ms * 1000UL;
+      if (g_irSilenceUs <= g_irDropoutUs) {
+        g_irSilenceUs = g_irDropoutUs + 500000UL;
+      }
+    }
+    return;
+  }
+  if (s.startsWith(F("SET_IR_SILENCE_MS"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    uint32_t ms = (uint32_t)s.substring(sp + 1).toInt();
+    if (ms >= 500u && ms <= 10000u) {
+      unsigned long u = (unsigned long)ms * 1000UL;
+      if (u <= g_irDropoutUs) {
+        u = g_irDropoutUs + 500000UL;
+      }
+      g_irSilenceUs = u;
+    }
+    return;
+  }
+  if (s.startsWith(F("SET_RPM_DECAY"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 0.85f && v <= 0.995f) g_rpmDecayPerTick = v;
+    return;
+  }
+  if (s.startsWith(F("SET_IR_MAX_INSTANT_RPM"))) {
+    int sp = s.indexOf(' ');
+    if (sp < 0) return;
+    float v = s.substring(sp + 1).toFloat();
+    if (v >= 80.0f && v <= 800.0f) g_irMaxInstantRpm = v;
+    return;
+  }
   if (s.startsWith(F("TARGET_M"))) {
     int sp = s.indexOf(' ');
     if (sp < 0) return;
@@ -544,19 +754,50 @@ static void updateRpm(uint32_t) {
     interrupts();
 
     if (interval > 0) {
-      float instantRpm = (60000000.0f / (float)interval) / (float)pulsesPerRevolution;
-      rpmMeasured = rpmEmaAlpha * instantRpm + (1.0f - rpmEmaAlpha) * rpmMeasured;
+      float rawInstant =
+          (60000000.0f / (float)interval) / (float)pulsesPerRevolution;
+      if (rawInstant > g_irMaxInstantRpm) {
+        return;
+      }
+      pushIrIntervalForMedian(interval);
+      unsigned long medIv = irMedianIntervalUs();
+      if (medIv == 0) {
+        return;
+      }
+      float instantRpm =
+          (60000000.0f / (float)medIv) / (float)pulsesPerRevolution;
+      if (instantRpm > g_irMaxInstantRpm) {
+        return;
+      }
+      rpmMeasured =
+          g_rpmEmaAlpha * instantRpm + (1.0f - g_rpmEmaAlpha) * rpmMeasured;
     }
   }
+  /* Dropout / decay / full silence: applyIrRpmDropoutDecay in loop (~RPM_SAMPLE_MS). */
+}
 
-  unsigned long since;
+/** Microseconds since last IR edge (for dropout / silence and irSignalLive). */
+static unsigned long irSincePulseUs() {
+  unsigned long sp;
   noInterrupts();
-  since = micros() - lastIrPulseUs;
+  sp = micros() - lastIrPulseUs;
   interrupts();
+  return sp;
+}
 
-  if (since > rpmPulseTimeoutUs && rpmMeasured > 0.0f) {
+/** Coast RPM estimate down on IR dropout; zero after long silence. Runs even when disarmed so telemetry does not stick at the last value when the wheel stops. */
+static void applyIrRpmDropoutDecay(unsigned long sincePulse) {
+  if (sincePulse >= g_irSilenceUs) {
     rpmMeasured = 0.0f;
+    resetIrMedianIntervals();
+    noInterrupts();
     irIsFirstPulse = true;
+    interrupts();
+  } else if (sincePulse >= g_irDropoutUs && rpmMeasured > 0.05f) {
+    rpmMeasured *= g_rpmDecayPerTick;
+    if (rpmMeasured < 0.4f) {
+      rpmMeasured = 0.0f;
+    }
   }
 }
 
@@ -564,6 +805,9 @@ static void updateControl(uint32_t now) {
   if (now - lastControlMs < RPM_SAMPLE_MS) return;
   uint32_t dt = now - lastControlMs;
   lastControlMs = now;
+
+  unsigned long sincePulse = irSincePulseUs();
+  const bool irSignalLive = (sincePulse < g_irDropoutUs);
 
   if (!armed || targetRpmMax <= 0) {
     motorStop();
@@ -586,26 +830,75 @@ static void updateControl(uint32_t now) {
     return;
   }
 
-  int lo = targetRpmMin;
-  int hi = targetRpmMax;
-  float err;
-  if (lo == hi) {
-    err = (float)lo - rpmMeasured;
-  } else if (rpmMeasured < (float)lo) {
-    err = (float)lo - rpmMeasured;
-  } else if (rpmMeasured > (float)hi) {
-    err = (float)hi - rpmMeasured;
-  } else {
-    err = 0.0f;
+  if (sincePulse >= g_irDropoutUs && sincePulse < g_irSilenceUs &&
+      rpmMeasured > 0.05f) {
+    integral *= 0.92f;
   }
 
-  integral += err * ((float)dt / 1000.0f);
-  if (integral > 120.0f) integral = 120.0f;
-  if (integral < -120.0f) integral = -120.0f;
-  pwmOut = g_kp * err + g_ki * integral;
-  if (pwmOut < 0) pwmOut = 0;
-  if (pwmOut > g_pwmMax) pwmOut = g_pwmMax;
-  motorPwmForward(pwmOut);
+  int lo = targetRpmMin;
+  int hi = targetRpmMax;
+  float rpmMid;
+  float err;
+  if (lo == hi) {
+    rpmMid = (float)lo;
+    err = rpmMid - rpmMeasured;
+  } else {
+    rpmMid = 0.5f * ((float)lo + (float)hi);
+    err = rpmMid - rpmMeasured;
+  }
+
+  float dtSec = (float)dt / 1000.0f;
+  if (dtSec < 0.001f) dtSec = 0.001f;
+
+  if (!g_pidDInitialized) {
+    rpmForD = rpmMeasured;
+    rpmForD_prev = rpmMeasured;
+    g_pidDInitialized = true;
+  }
+
+  float kpEff = g_kp;
+  float kiEff = g_ki;
+  if (fabs(err) < g_errRelaxRpm) {
+    kpEff *= g_gainScaleInBand;
+    kiEff *= g_gainScaleInBand;
+  }
+
+  float pwmCmdPi = kpEff * err + kiEff * integral;
+  bool windup =
+      (pwmCmdPi >= g_pwmMax && err > 0.0f) ||
+      (pwmCmdPi <= 0.0f && err < 0.0f);
+  if (!windup) {
+    integral += err * dtSec;
+    if (integral > 120.0f) integral = 120.0f;
+    if (integral < -120.0f) integral = -120.0f;
+  }
+
+  pwmCmdPi = kpEff * err + kiEff * integral;
+
+  rpmForD =
+      g_rpmEmaAlpha * rpmMeasured + (1.0f - g_rpmEmaAlpha) * rpmForD;
+  float dRpmDt = (rpmForD - rpmForD_prev) / dtSec;
+  rpmForD_prev = rpmForD;
+  float dTerm = -g_kd * dRpmDt;
+  if (dTerm > g_dMax) dTerm = g_dMax;
+  else if (dTerm < -g_dMax) dTerm = -g_dMax;
+
+  float pwmFf = g_rpmFf * rpmMid;
+
+  float pwmCmd = pwmCmdPi + dTerm + pwmFf;
+  if (pwmCmd < 0) pwmCmd = 0;
+  if (pwmCmd > g_pwmMax) pwmCmd = g_pwmMax;
+
+  float slew = g_pwmSlewPerTick;
+  if (slew < 0.5f) slew = 0.5f;
+  float d = pwmCmd - pwmApplied;
+  if (d > slew) d = slew;
+  else if (d < -slew) d = -slew;
+  pwmApplied += d;
+  if (pwmApplied < 0) pwmApplied = 0;
+  if (pwmApplied > g_pwmMax) pwmApplied = g_pwmMax;
+  pwmOut = pwmApplied;
+  motorPwmForward(pwmApplied);
 
   bool inBand;
   if (lo == hi) {
@@ -613,7 +906,12 @@ static void updateControl(uint32_t now) {
     if (tol < 2.0f) tol = 2.0f;
     inBand = fabs((float)lo - rpmMeasured) <= tol;
   } else {
-    inBand = rpmMeasured >= (float)lo && rpmMeasured <= (float)hi;
+    float halfW = 0.5f * ((float)hi - (float)lo);
+    float tol = rpmMid * g_rpmTolRatio;
+    if (tol < 2.0f) tol = 2.0f;
+    if (tol > halfW) tol = halfW;
+    inBand = (rpmMeasured >= (float)lo && rpmMeasured <= (float)hi) &&
+             (fabs(rpmMeasured - rpmMid) <= tol);
   }
 
   if (inBand) {
@@ -630,7 +928,9 @@ static void updateControl(uint32_t now) {
     setState(ST_FEEDING);
   }
 
-  if (pwmOut >= g_stallPwmThreshold && fabs(rpmMeasured) < g_stallRpmThreshold) {
+  /* Stall only when IR still reports pulses — dropout is not a mechanical stall. */
+  if (irSignalLive && pwmApplied >= g_stallPwmThreshold &&
+      fabs(rpmMeasured) < g_stallRpmThreshold) {
     stallAccumMs += dt;
     if (stallAccumMs > STALL_CHECK_MS) {
       errMsg = F("STALL");
@@ -686,12 +986,14 @@ void setup() {
   pinMode(PIN_IR_RPM, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PIN_IR_RPM), recordIrPulse, FALLING);
 
-  feeder.attach(PIN_SERVO);
+  feeder.attach(PIN_SERVO, SERVO_US_MIN, SERVO_US_MAX);
   feeder.write(0);
+  delay(400);
 
   uint32_t t0 = millis();
   lastTelemMs = t0;
   lastControlMs = t0;
+  lastIrDecayMs = t0;
 }
 
 void loop() {
@@ -709,13 +1011,24 @@ void loop() {
   }
 
   updateRpm(now);
+  if (now - lastIrDecayMs >= RPM_SAMPLE_MS) {
+    lastIrDecayMs = now;
+    applyIrRpmDropoutDecay(irSincePulseUs());
+  }
   if (g_testMode) {
     motorPwmForward(g_testPwm);
     pwmOut = g_testPwm;
-    feeder.write(0);
+    if (g_servoTestActive) {
+      updateServoTest(now);
+    } else {
+      feeder.write(0);
+    }
   } else {
     updateFeeder(now);
     updateControl(now);
+    if (g_servoTestActive) {
+      updateServoTest(now);
+    }
   }
 
   if (now - lastTelemMs >= TELEMETRY_MS) {

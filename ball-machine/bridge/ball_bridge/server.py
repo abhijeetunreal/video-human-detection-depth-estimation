@@ -323,6 +323,10 @@ def create_app(
                     telemetry.push_bridge_line("INFO: FEED_ONCE forwarded to MCU")
                     serial_write("FEED_ONCE\n")
                     continue
+                if data.get("type") == "servo_test":
+                    telemetry.push_bridge_line("INFO: SERVO_TEST forwarded to MCU")
+                    serial_write("SERVO_TEST\n")
+                    continue
 
                 test_on = bool(data.get("test_mode", False))
                 tun_raw = data.get("tuning")

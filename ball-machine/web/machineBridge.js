@@ -198,6 +198,11 @@ export function createMachineBridge() {
     ws.send(JSON.stringify({ type: "feed_once" }));
   }
 
+  function sendServoTest() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "servo_test" }));
+  }
+
   return {
     connect,
     disconnect,
@@ -207,6 +212,7 @@ export function createMachineBridge() {
     sendStop,
     sendBandsReset,
     sendFeedOnce,
+    sendServoTest,
     setOnTelemetry(fn) {
       onTelemetry = fn;
     },
