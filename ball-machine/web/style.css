@@ -357,6 +357,69 @@ a:hover {
 
 .panel-local-tabs--tracking-row {
   gap: 0.5rem 0.65rem;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.tracking-header-trailing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem 0.65rem;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.btn-toggle-depth {
+  flex-shrink: 0;
+  padding: 0.28rem 0.55rem;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vscode-fg-muted);
+  background: var(--vscode-sideBar-bg);
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--font);
+  line-height: 1.2;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+
+.btn-toggle-depth:hover {
+  color: var(--vscode-titleBar-fg);
+  border-color: var(--vscode-focus);
+  background: color-mix(in srgb, var(--vscode-sideBar-bg) 85%, var(--vscode-focus));
+}
+
+.btn-toggle-depth:focus-visible {
+  outline: 1px solid var(--vscode-focus);
+  outline-offset: 2px;
+}
+
+.btn-toggle-depth[aria-pressed="false"] {
+  color: #888;
+  opacity: 0.95;
+}
+
+body.depth-panel-hidden #camera-panels {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  background: var(--vscode-editor-bg);
+}
+
+body.depth-panel-hidden #camera-panels > .camera-panel:first-child {
+  width: fit-content;
+  max-width: 100%;
+}
+
+body.depth-panel-hidden #camera-panel-depth {
+  display: none;
 }
 
 .panel-local-tabs__tabs {

@@ -22,6 +22,7 @@ const PLAYER_PALETTE = [
 
 const PRESET_KEY = "ballMachineDetectionPresets";
 const THEME_STORAGE_KEY = "ballMachineUiTheme";
+const DEPTH_PANEL_VISIBLE_KEY = "ballMachineDepthPanelVisible";
 const THROW_CONFIG_KEY = "ballMachineThrowConfig_v2";
 const THROW_CONFIG_KEY_LEGACY = "ballMachineThrowConfig_v1";
 
@@ -303,6 +304,7 @@ async function hasFp16() {
 }
 
 const statusEl = document.getElementById("status");
+const btnToggleDepth = document.getElementById("btn-toggle-depth");
 const container = document.getElementById("container");
 const depthContainer = document.getElementById("depth-container");
 const overlay = document.getElementById("overlay");
@@ -1061,6 +1063,43 @@ function loadThrowConfigFromStorage() {
   } catch {
     return null;
   }
+}
+
+function loadDepthPanelVisiblePreference() {
+  try {
+    const v = localStorage.getItem(DEPTH_PANEL_VISIBLE_KEY);
+    if (v === "0") return false;
+    if (v === "1") return true;
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
+
+/**
+ * @param {boolean} visible
+ */
+function applyDepthPanelVisibility(visible) {
+  document.body.classList.toggle("depth-panel-hidden", !visible);
+  if (btnToggleDepth) {
+    btnToggleDepth.setAttribute("aria-pressed", visible ? "true" : "false");
+    btnToggleDepth.textContent = visible ? "Hide depth" : "Show depth";
+  }
+  try {
+    localStorage.setItem(DEPTH_PANEL_VISIBLE_KEY, visible ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+  syncPanelSizes();
+}
+
+function initDepthPanelToggle() {
+  if (!btnToggleDepth) return;
+  applyDepthPanelVisibility(loadDepthPanelVisiblePreference());
+  btnToggleDepth.addEventListener("click", () => {
+    const isHidden = document.body.classList.contains("depth-panel-hidden");
+    applyDepthPanelVisibility(isHidden);
+  });
 }
 
 function onThrowSettingsChanged() {
@@ -2893,6 +2932,7 @@ function updateCanvas() {
 initThrowTuningUi();
 initTerminalPanelUi();
 initRightPanelTabs();
+initDepthPanelToggle();
 
 navigator.mediaDevices
   .getUserMedia({ video: true })

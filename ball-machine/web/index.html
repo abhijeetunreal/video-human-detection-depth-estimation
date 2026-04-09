@@ -388,11 +388,23 @@
                   >Tracking</span
                 >
               </nav>
-              <p
-                id="status"
-                class="fps-status fps-status--beside-tab"
-                aria-live="polite"
-              ></p>
+              <div class="tracking-header-trailing">
+                <button
+                  type="button"
+                  id="btn-toggle-depth"
+                  class="btn-toggle-depth"
+                  aria-pressed="true"
+                  aria-controls="camera-panel-depth"
+                  title="Show or hide the depth camera panel"
+                >
+                  Hide depth
+                </button>
+                <p
+                  id="status"
+                  class="fps-status fps-status--beside-tab"
+                  aria-live="polite"
+                ></p>
+              </div>
             </div>
             <div class="panel-vision-body">
             <div id="vision-stage" class="vision-stage">
@@ -406,7 +418,7 @@
                     <div id="calibration-layer" aria-hidden="true"></div>
                   </div>
                 </div>
-                <div class="camera-panel">
+                <div class="camera-panel" id="camera-panel-depth">
                   <div class="camera-panel-title">Depth</div>
                   <div id="depth-container">
                     <canvas id="depth-canvas"></canvas>
